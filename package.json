@@ -38,7 +38,7 @@
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
     "cloudinary": "^2.10.0",
-    "jose": "^6.2.3",
+    "jose": "^4.15.9",
     "nodemailer": "^9.0.3",
     "pdfkit": "^0.19.1",
     "reflect-metadata": "^0.2.2",
