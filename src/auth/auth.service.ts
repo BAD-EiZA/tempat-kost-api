@@ -101,6 +101,7 @@ export class AuthService {
         { href: '/dashboard/approvals', label: 'Approve' },
         { href: '/dashboard/structure', label: 'Struktur' },
         { href: '/dashboard/flags', label: 'Flags' },
+        { href: '/dashboard/audit-log', label: 'Audit' },
       );
     }
     items.push({ href: '/portal', label: 'Portal' });

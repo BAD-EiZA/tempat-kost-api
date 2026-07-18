@@ -18,9 +18,17 @@ export class CrmService {
   ) {}
 
   async listProspects(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'tenant',
+      'view',
+    );
     return this.prisma.prospect.findMany({
-      where: { workspaceId },
+      where: {
+        workspaceId,
+        ...this.workspaces.propertyIdFilter(membership),
+      },
       orderBy: { createdAt: 'desc' },
       include: { property: { select: { id: true, name: true } } },
     });
@@ -39,10 +47,20 @@ export class CrmService {
       notes?: string;
     },
   ) {
-    const { user } = await this.workspaces.assertMember(
+    const { user, membership } = await this.workspaces.assertPermission(
       auth,
       input.workspaceId,
+      'tenant',
+      'create',
     );
+    this.workspaces.assertPropertyInScope(membership, input.propertyId);
+    if (input.propertyId) {
+      const property = await this.prisma.property.findFirst({
+        where: { id: input.propertyId, workspaceId: input.workspaceId },
+        select: { id: true },
+      });
+      if (!property) throw new NotFoundException('Property not found');
+    }
     const p = await this.prisma.prospect.create({
       data: {
         workspaceId: input.workspaceId,
@@ -73,27 +91,41 @@ export class CrmService {
   ) {
     const p = await this.prisma.prospect.findUnique({ where: { id } });
     if (!p) throw new NotFoundException();
-    await this.workspaces.assertMember(auth, p.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      p.workspaceId,
+      'tenant',
+      'update',
+    );
+    this.workspaces.assertPropertyInScope(membership, p.propertyId);
     return this.prisma.prospect.update({
       where: { id },
       data: {
         status,
         lostReason:
-          status === 'LOST' ? lostReason ?? p.lostReason ?? 'unspecified' : null,
+          status === 'LOST'
+            ? (lostReason ?? p.lostReason ?? 'unspecified')
+            : null,
       },
     });
   }
 
   async funnel(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'tenant',
+      'view',
+    );
+    const scopeFilter = this.workspaces.propertyIdFilter(membership);
     const rows = await this.prisma.prospect.groupBy({
       by: ['status'],
-      where: { workspaceId },
+      where: { workspaceId, ...scopeFilter },
       _count: true,
     });
     const lost = await this.prisma.prospect.groupBy({
       by: ['lostReason'],
-      where: { workspaceId, status: 'LOST' },
+      where: { workspaceId, status: 'LOST', ...scopeFilter },
       _count: true,
     });
     return {
@@ -118,19 +150,47 @@ export class CrmService {
       notes?: string;
     },
   ) {
-    const { user } = await this.workspaces.assertMember(
+    const { user, membership } = await this.workspaces.assertPermission(
       auth,
       input.workspaceId,
+      'lease',
+      'create',
     );
+    this.workspaces.assertPropertyInScope(membership, input.propertyId);
+    const property = await this.prisma.property.findFirst({
+      where: { id: input.propertyId, workspaceId: input.workspaceId },
+      select: { id: true },
+    });
+    if (!property) throw new NotFoundException('Property not found');
+    if (input.prospectId) {
+      const prospect = await this.prisma.prospect.findFirst({
+        where: { id: input.prospectId, workspaceId: input.workspaceId },
+        select: { propertyId: true },
+      });
+      if (
+        !prospect ||
+        (prospect.propertyId && prospect.propertyId !== input.propertyId)
+      ) {
+        throw new BadRequestException('Prospect does not belong to property');
+      }
+    }
     const holdUntil = new Date();
     holdUntil.setDate(holdUntil.getDate() + (input.holdDays ?? 3));
 
     const booking = await this.prisma.$transaction(async (tx) => {
       if (input.roomId) {
-        await tx.room.update({
-          where: { id: input.roomId },
+        const reserved = await tx.room.updateMany({
+          where: {
+            id: input.roomId,
+            workspaceId: input.workspaceId,
+            propertyId: input.propertyId,
+            status: RoomStatus.AVAILABLE,
+          },
           data: { status: RoomStatus.RESERVED },
         });
+        if (reserved.count !== 1) {
+          throw new BadRequestException('Room not available');
+        }
       }
       return tx.booking.create({
         data: {
@@ -157,9 +217,17 @@ export class CrmService {
   }
 
   async listBookings(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'lease',
+      'view',
+    );
     return this.prisma.booking.findMany({
-      where: { workspaceId },
+      where: {
+        workspaceId,
+        ...this.workspaces.propertyIdFilter(membership),
+      },
       orderBy: { createdAt: 'desc' },
       include: {
         property: { select: { id: true, name: true } },
@@ -198,13 +266,18 @@ export class CrmService {
     return { expired: expired.length };
   }
 
-  async convertProspect(
-    auth: AuthUser,
-    prospectId: string,
-  ) {
-    const p = await this.prisma.prospect.findUnique({ where: { id: prospectId } });
+  async convertProspect(auth: AuthUser, prospectId: string) {
+    const p = await this.prisma.prospect.findUnique({
+      where: { id: prospectId },
+    });
     if (!p) throw new NotFoundException();
-    const { user } = await this.workspaces.assertMember(auth, p.workspaceId);
+    const { user, membership } = await this.workspaces.assertPermission(
+      auth,
+      p.workspaceId,
+      'tenant',
+      'create',
+    );
+    this.workspaces.assertPropertyInScope(membership, p.propertyId);
     const tenant = await this.prisma.tenant.create({
       data: {
         workspaceId: p.workspaceId,
@@ -234,12 +307,20 @@ export class CrmService {
       include: { prospect: true },
     });
     if (!booking) throw new NotFoundException('Booking not found');
-    await this.workspaces.assertMember(auth, booking.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      booking.workspaceId,
+      'invoice',
+      'create',
+    );
+    this.workspaces.assertPropertyInScope(membership, booking.propertyId);
     if (Number(booking.feeAmount) <= 0) {
       throw new BadRequestException('Booking fee is zero');
     }
     if (booking.feeInvoiceId) {
-      return this.prisma.invoice.findUnique({ where: { id: booking.feeInvoiceId } });
+      return this.prisma.invoice.findUnique({
+        where: { id: booking.feeInvoiceId },
+      });
     }
 
     let tenantId: string | undefined;
@@ -313,7 +394,27 @@ export class CrmService {
       where: { id: bookingId },
     });
     if (!booking) throw new NotFoundException();
-    await this.workspaces.assertMember(auth, booking.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      booking.workspaceId,
+      'lease',
+      'update',
+    );
+    this.workspaces.assertPropertyInScope(membership, booking.propertyId);
+    if (Number(booking.feeAmount) > 0) {
+      if (!booking.feeInvoiceId) {
+        throw new BadRequestException('Booking fee invoice missing');
+      }
+      const invoice = await this.prisma.invoice.findFirst({
+        where: {
+          id: booking.feeInvoiceId,
+          workspaceId: booking.workspaceId,
+          status: 'PAID',
+        },
+        select: { id: true },
+      });
+      if (!invoice) throw new BadRequestException('Booking fee is not paid');
+    }
     return this.prisma.booking.update({
       where: { id: bookingId },
       data: { status: BookingStatus.PAID },

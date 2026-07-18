@@ -82,6 +82,20 @@ export class PortalController {
     return this.portal.invoices(user, query.tenantId);
   }
 
+  @Get('notifications')
+  notifications(@CurrentUser() user: AuthUser, @Query() query: TenantQueryDto) {
+    return this.portal.notifications(user, query.tenantId);
+  }
+
+  @Post('notifications/:id/read')
+  readNotification(
+    @CurrentUser() user: AuthUser,
+    @Query() query: TenantQueryDto,
+    @Param('id') id: string,
+  ) {
+    return this.portal.readNotification(user, query.tenantId, id);
+  }
+
   @Get('invoices/:invoiceId')
   invoice(
     @CurrentUser() user: AuthUser,

@@ -104,8 +104,6 @@ export class PublicService {
     fullName: string;
     phone: string;
     email?: string;
-    holdDays?: number;
-    feeAmount?: number;
     notes?: string;
   }) {
     const property = await this.prisma.property.findFirst({
@@ -123,11 +121,8 @@ export class PublicService {
     if (!room) throw new BadRequestException('Room not available');
 
     const holdUntil = new Date();
-    holdUntil.setDate(holdUntil.getDate() + (input.holdDays ?? 3));
-    const fee =
-      input.feeAmount !== undefined
-        ? input.feeAmount
-        : Math.min(Number(room.depositAmount) || 500000, 500000);
+    holdUntil.setDate(holdUntil.getDate() + 3);
+    const fee = Math.min(Number(room.depositAmount) || 500000, 500000);
 
     const result = await this.prisma.$transaction(async (tx) => {
       const prospect = await tx.prospect.create({
@@ -143,10 +138,18 @@ export class PublicService {
         },
       });
 
-      await tx.room.update({
-        where: { id: room.id },
+      const reserved = await tx.room.updateMany({
+        where: {
+          id: room.id,
+          workspaceId: property.workspaceId,
+          propertyId: property.id,
+          status: RoomStatus.AVAILABLE,
+        },
         data: { status: RoomStatus.RESERVED },
       });
+      if (reserved.count !== 1) {
+        throw new BadRequestException('Room not available');
+      }
 
       const booking = await tx.booking.create({
         data: {

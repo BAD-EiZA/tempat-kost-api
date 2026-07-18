@@ -17,8 +17,10 @@ export class InsightsService {
     @Inject(AI_PROVIDER_PORT) private readonly ai: AiProviderPort,
   ) {}
 
-  private async metrics(workspaceId: string, propertyId?: string) {
-    const propFilter = propertyId ? { propertyId } : {};
+  private async metrics(
+    workspaceId: string,
+    propFilter: { propertyId?: string | { in: string[] } },
+  ) {
     const [
       collected,
       billed,
@@ -32,7 +34,7 @@ export class InsightsService {
         where: {
           workspaceId,
           status: 'CONFIRMED',
-          ...(propertyId ? { propertyId } : {}),
+          ...propFilter,
         },
         _sum: { amount: true },
       }),
@@ -48,7 +50,7 @@ export class InsightsService {
         where: {
           workspaceId,
           status: 'PAID',
-          ...(propertyId ? { propertyId } : {}),
+          ...propFilter,
         },
         _sum: { amount: true },
       }),
@@ -56,14 +58,14 @@ export class InsightsService {
         where: {
           workspaceId,
           status: 'OCCUPIED',
-          ...(propertyId ? { propertyId } : {}),
+          ...propFilter,
         },
       }),
       this.prisma.room.count({
         where: {
           workspaceId,
           status: { not: 'INACTIVE' },
-          ...(propertyId ? { propertyId } : {}),
+          ...propFilter,
         },
       }),
       this.prisma.invoice.count({
@@ -98,7 +100,16 @@ export class InsightsService {
     months = 6,
     propertyId?: string,
   ) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'report',
+      'view',
+    );
+    this.workspaces.assertPropertyInScope(membership, propertyId);
+    const prop = propertyId
+      ? { propertyId }
+      : this.workspaces.propertyIdFilter(membership);
     const n = Math.min(Math.max(months, 1), 24);
     const series: Array<{
       month: string;
@@ -112,7 +123,6 @@ export class InsightsService {
       const start = new Date(now.getFullYear(), now.getMonth() - i, 1);
       const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 1);
       const month = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}`;
-      const prop = propertyId ? { propertyId } : {};
       const [inAgg, outAgg] = await Promise.all([
         this.prisma.payment.aggregate({
           where: {
@@ -151,9 +161,18 @@ export class InsightsService {
     workspaceId: string,
     propertyId?: string,
   ) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'report',
+      'view',
+    );
+    this.workspaces.assertPropertyInScope(membership, propertyId);
+    const propFilter = propertyId
+      ? { propertyId }
+      : this.workspaces.propertyIdFilter(membership);
     await this.subscriptions.consumeAiCredit(workspaceId);
-    const m = await this.metrics(workspaceId, propertyId);
+    const m = await this.metrics(workspaceId, propFilter);
     const history = await this.cashHistory(auth, workspaceId, 3, propertyId);
     const out = await this.ai.summarizeFinance({
       period: 'bulan berjalan',
@@ -173,11 +192,19 @@ export class InsightsService {
     workspaceId: string,
     propertyId?: string,
   ) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'report',
+      'view',
+    );
+    this.workspaces.assertPropertyInScope(membership, propertyId);
+    const propFilter = propertyId
+      ? { propertyId }
+      : this.workspaces.propertyIdFilter(membership);
     await this.subscriptions.consumeAiCredit(workspaceId);
-    const m = await this.metrics(workspaceId, propertyId);
+    const m = await this.metrics(workspaceId, propFilter);
     const history = await this.cashHistory(auth, workspaceId, 6, propertyId);
-    const propFilter = propertyId ? { propertyId } : {};
     const openInvoices = await this.prisma.invoice.findMany({
       where: {
         workspaceId,
@@ -194,7 +221,7 @@ export class InsightsService {
       where: {
         workspaceId,
         isActive: true,
-        ...(propertyId ? { propertyId } : {}),
+        ...propFilter,
       },
       _sum: { amount: true },
     });
@@ -238,10 +265,20 @@ export class InsightsService {
     auth: AuthUser,
     input: { workspaceId: string; roomId: string },
   ) {
-    await this.workspaces.assertMember(auth, input.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      input.workspaceId,
+      'report',
+      'view',
+    );
+    const propertyFilter = this.workspaces.propertyIdFilter(membership);
     await this.subscriptions.consumeAiCredit(input.workspaceId);
     const room = await this.prisma.room.findFirst({
-      where: { id: input.roomId, workspaceId: input.workspaceId },
+      where: {
+        id: input.roomId,
+        workspaceId: input.workspaceId,
+        ...propertyFilter,
+      },
       include: { property: true, roomType: true },
     });
     if (!room) throw new Error('Room not found');

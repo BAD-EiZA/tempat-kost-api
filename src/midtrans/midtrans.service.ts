@@ -6,11 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash, randomUUID, timingSafeEqual } from 'crypto';
-import {
-  InvoiceStatus,
-  PaymentStatus,
-  Prisma,
-} from '@prisma/client';
+import { InvoiceStatus, PaymentStatus, Prisma } from '@prisma/client';
 import type { AuthUser } from '../common/auth/auth.types';
 import { AuditService } from '../common/audit/audit.service';
 import { PrismaService } from '../common/prisma/prisma.service';
@@ -56,14 +52,25 @@ export class MidtransService {
       throw new BadRequestException('MIDTRANS_SERVER_KEY not configured');
     }
 
-    if (!input.skipMemberCheck) {
-      await this.workspaces.assertMember(auth, input.workspaceId);
-    }
+    const staffContext = !input.skipMemberCheck
+      ? await this.workspaces.assertPermission(
+          auth,
+          input.workspaceId,
+          'payment',
+          'create',
+        )
+      : null;
     const invoice = await this.prisma.invoice.findFirst({
       where: { id: input.invoiceId, workspaceId: input.workspaceId },
       include: { tenant: true },
     });
     if (!invoice) throw new NotFoundException('Invoice not found');
+    if (staffContext) {
+      this.workspaces.assertPropertyInScope(
+        staffContext.membership,
+        invoice.propertyId,
+      );
+    }
     if (
       invoice.status === InvoiceStatus.DRAFT ||
       invoice.status === InvoiceStatus.VOID ||
@@ -72,7 +79,9 @@ export class MidtransService {
       throw new BadRequestException('Invoice not payable');
     }
 
-    const outstanding = new Prisma.Decimal(invoice.total).sub(invoice.amountPaid);
+    const outstanding = new Prisma.Decimal(invoice.total).sub(
+      invoice.amountPaid,
+    );
     if (outstanding.lessThanOrEqualTo(0)) {
       throw new BadRequestException('Nothing outstanding');
     }
@@ -183,20 +192,22 @@ export class MidtransService {
       signature_key: signatureKey,
     });
 
-    await this.prisma.webhookEvent.create({
-      data: {
-        provider: 'midtrans',
-        eventType: transactionStatus || 'unknown',
-        externalId: transactionId
-          ? `${orderId}:${transactionId}:${transactionStatus}`
-          : `${orderId}:${transactionStatus}:${statusCode}`,
-        signatureValid,
-        payload: body as object,
-        status: signatureValid ? 'RECEIVED' : 'FAILED',
-      },
-    }).catch(() => {
-      // idempotent: unique external id may already exist
-    });
+    await this.prisma.webhookEvent
+      .create({
+        data: {
+          provider: 'midtrans',
+          eventType: transactionStatus || 'unknown',
+          externalId: transactionId
+            ? `${orderId}:${transactionId}:${transactionStatus}`
+            : `${orderId}:${transactionStatus}:${statusCode}`,
+          signatureValid,
+          payload: body as object,
+          status: signatureValid ? 'RECEIVED' : 'FAILED',
+        },
+      })
+      .catch(() => {
+        // idempotent: unique external id may already exist
+      });
 
     if (!signatureValid) {
       throw new BadRequestException('Invalid Midtrans signature');
@@ -210,14 +221,16 @@ export class MidtransService {
       return { ok: true, ignored: true };
     }
 
+    if (!new Prisma.Decimal(grossAmount).equals(attempt.amount)) {
+      throw new BadRequestException('Midtrans amount mismatch');
+    }
+
     const success =
-      transactionStatus === 'capture' ||
       transactionStatus === 'settlement' ||
       (transactionStatus === 'capture' && fraudStatus === 'accept');
 
     const pending =
-      transactionStatus === 'pending' ||
-      transactionStatus === 'authorize';
+      transactionStatus === 'pending' || transactionStatus === 'authorize';
 
     const fail =
       transactionStatus === 'deny' ||
@@ -226,8 +239,12 @@ export class MidtransService {
       transactionStatus === 'failure';
 
     if (pending) {
-      await this.prisma.paymentAttempt.update({
-        where: { id: attempt.id },
+      await this.prisma.paymentAttempt.updateMany({
+        where: {
+          id: attempt.id,
+          paymentId: null,
+          status: { not: 'settlement' },
+        },
         data: {
           status: 'pending',
           gatewayTransactionId: transactionId,
@@ -238,14 +255,19 @@ export class MidtransService {
     }
 
     if (fail) {
-      await this.prisma.paymentAttempt.update({
-        where: { id: attempt.id },
+      const failed = await this.prisma.paymentAttempt.updateMany({
+        where: {
+          id: attempt.id,
+          paymentId: null,
+          status: { not: 'settlement' },
+        },
         data: {
           status: 'failed',
           gatewayTransactionId: transactionId,
           rawResponse: body as object,
         },
       });
+      if (failed.count === 0) return { ok: true, status: 'already_processed' };
       // reopen invoice if still pending verification from this attempt only
       if (attempt.invoiceId) {
         const inv = await this.prisma.invoice.findUnique({
@@ -284,11 +306,22 @@ export class MidtransService {
     }
 
     const result = await this.prisma.$transaction(async (tx) => {
-      const year = new Date().getFullYear();
-      const count = await tx.payment.count({
-        where: { workspaceId: attempt.workspaceId },
+      const claimed = await tx.paymentAttempt.updateMany({
+        where: {
+          id: attempt.id,
+          paymentId: null,
+          status: { not: 'settlement' },
+        },
+        data: {
+          status: 'processing',
+          gatewayTransactionId: transactionId,
+          rawResponse: body as object,
+        },
       });
-      const paymentNumber = `PAY-${year}-${String(count + 1).padStart(5, '0')}`;
+      if (claimed.count === 0) return null;
+
+      const year = new Date().getFullYear();
+      const paymentNumber = `PAY-${year}-MT-${attempt.id.slice(-10)}`;
 
       const payment = await tx.payment.create({
         data: {
@@ -322,10 +355,13 @@ export class MidtransService {
           const status = amountPaid.greaterThanOrEqualTo(inv.total)
             ? InvoiceStatus.PAID
             : InvoiceStatus.PARTIALLY_PAID;
-          await tx.invoice.update({
-            where: { id: inv.id },
+          const changed = await tx.invoice.updateMany({
+            where: { id: inv.id, amountPaid: inv.amountPaid },
             data: { amountPaid, status },
           });
+          if (changed.count !== 1) {
+            throw new BadRequestException('Invoice balance changed; retry');
+          }
         }
       }
 
@@ -341,6 +377,8 @@ export class MidtransService {
 
       return payment;
     });
+
+    if (!result) return { ok: true, status: 'already_processed' };
 
     await this.audit.log({
       workspaceId: attempt.workspaceId,

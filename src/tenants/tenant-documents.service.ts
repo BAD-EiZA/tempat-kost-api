@@ -32,12 +32,29 @@ export class TenantDocumentsService {
     @Inject(AI_PROVIDER_PORT) private readonly ai: AiProviderPort,
   ) {}
 
+  private assertTenantInScope(
+    membership: Parameters<WorkspacesService['propertyScope']>[0],
+    leases: Array<{ propertyId: string }>,
+  ) {
+    const scope = this.workspaces.propertyScope(membership);
+    if (scope && leases.length && !leases.some((l) => scope.includes(l.propertyId))) {
+      throw new NotFoundException();
+    }
+  }
+
   async list(auth: AuthUser, tenantId: string) {
     const tenant = await this.prisma.tenant.findUnique({
       where: { id: tenantId },
+      include: { leases: { select: { propertyId: true } } },
     });
     if (!tenant) throw new NotFoundException();
-    await this.workspaces.assertMember(auth, tenant.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      tenant.workspaceId,
+      'tenant',
+      'view',
+    );
+    this.assertTenantInScope(membership, tenant.leases);
     return this.prisma.tenantDocument.findMany({
       where: { tenantId },
       orderBy: { createdAt: 'desc' },
@@ -59,12 +76,16 @@ export class TenantDocumentsService {
   ) {
     const tenant = await this.prisma.tenant.findUnique({
       where: { id: input.tenantId },
+      include: { leases: { select: { propertyId: true } } },
     });
     if (!tenant) throw new NotFoundException();
-    const { user } = await this.workspaces.assertMember(
+    const { user, membership } = await this.workspaces.assertPermission(
       auth,
       tenant.workspaceId,
+      'tenant',
+      'update',
     );
+    this.assertTenantInScope(membership, tenant.leases);
 
     if (input.runOcr && !input.consent) {
       throw new BadRequestException(
@@ -111,7 +132,17 @@ export class TenantDocumentsService {
       include: { tenant: true },
     });
     if (!doc) throw new NotFoundException();
-    await this.workspaces.assertMember(auth, doc.tenant.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      doc.tenant.workspaceId,
+      'tenant',
+      'update',
+    );
+    const leases = await this.prisma.lease.findMany({
+      where: { tenantId: doc.tenantId },
+      select: { propertyId: true },
+    });
+    this.assertTenantInScope(membership, leases);
     if (!doc.ocrJson) {
       throw new BadRequestException('Dokumen belum punya hasil OCR');
     }

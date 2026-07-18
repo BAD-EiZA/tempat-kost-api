@@ -16,9 +16,11 @@ export class MaintenanceService {
   ) {}
 
   async list(auth: AuthUser, workspaceId: string) {
-    const { membership } = await this.workspaces.assertMember(
+    const { membership } = await this.workspaces.assertPermission(
       auth,
       workspaceId,
+      'maintenance',
+      'view',
     );
     return this.prisma.maintenanceRequest.findMany({
       where: {
@@ -49,10 +51,25 @@ export class MaintenanceService {
       runAi?: boolean;
     },
   ) {
-    const { user } = await this.workspaces.assertMember(
+    const { user, membership } = await this.workspaces.assertPermission(
       auth,
       input.workspaceId,
+      'maintenance',
+      'create',
     );
+    this.workspaces.assertPropertyInScope(membership, input.propertyId);
+    const [property, room, tenant] = await Promise.all([
+      this.prisma.property.findFirst({ where: { id: input.propertyId, workspaceId: input.workspaceId } }),
+      input.roomId
+        ? this.prisma.room.findFirst({ where: { id: input.roomId, workspaceId: input.workspaceId, propertyId: input.propertyId } })
+        : null,
+      input.tenantId
+        ? this.prisma.tenant.findFirst({ where: { id: input.tenantId, workspaceId: input.workspaceId } })
+        : null,
+    ]);
+    if (!property) throw new NotFoundException('Property not found');
+    if (input.roomId && !room) throw new NotFoundException('Room not found');
+    if (input.tenantId && !tenant) throw new NotFoundException('Tenant not found');
 
     let aiJson: Record<string, unknown> | undefined;
     let urgency = input.urgency ?? 'medium';
@@ -154,10 +171,13 @@ export class MaintenanceService {
       where: { id },
     });
     if (!existing) throw new NotFoundException('Not found');
-    const { user } = await this.workspaces.assertMember(
+    const { user, membership } = await this.workspaces.assertPermission(
       auth,
       existing.workspaceId,
+      'maintenance',
+      'update',
     );
+    this.workspaces.assertPropertyInScope(membership, existing.propertyId);
     const updated = await this.prisma.maintenanceRequest.update({
       where: { id },
       data: {

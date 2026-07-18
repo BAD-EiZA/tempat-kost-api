@@ -18,7 +18,14 @@ export class ReportsService {
   ) {}
 
   async overview(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'report',
+      'view',
+    );
+    const propertyFilter = this.workspaces.propertyIdFilter(membership);
+    const propertyScope = this.workspaces.propertyScope(membership);
 
     const [
       properties,
@@ -32,23 +39,38 @@ export class ReportsService {
       expensesPaid,
     ] = await Promise.all([
       this.prisma.property.count({
-        where: { workspaceId, status: { not: 'ARCHIVED' } },
+        where: {
+          workspaceId,
+          status: { not: 'ARCHIVED' },
+          ...(propertyScope ? { id: { in: propertyScope } } : {}),
+        },
       }),
       this.prisma.room.count({
-        where: { workspaceId, status: { not: RoomStatus.INACTIVE } },
+        where: {
+          workspaceId,
+          status: { not: RoomStatus.INACTIVE },
+          ...propertyFilter,
+        },
       }),
       this.prisma.room.count({
-        where: { workspaceId, status: RoomStatus.OCCUPIED },
+        where: { workspaceId, status: RoomStatus.OCCUPIED, ...propertyFilter },
       }),
       this.prisma.tenant.count({
-        where: { workspaceId, status: 'ACTIVE' },
+        where: {
+          workspaceId,
+          status: 'ACTIVE',
+          ...(propertyScope
+            ? { leases: { some: { propertyId: { in: propertyScope } } } }
+            : {}),
+        },
       }),
       this.prisma.lease.count({
-        where: { workspaceId, status: LeaseStatus.ACTIVE },
+        where: { workspaceId, status: LeaseStatus.ACTIVE, ...propertyFilter },
       }),
       this.prisma.invoice.aggregate({
         where: {
           workspaceId,
+          ...propertyFilter,
           status: {
             in: [
               InvoiceStatus.OPEN,
@@ -62,13 +84,17 @@ export class ReportsService {
         _count: true,
       }),
       this.prisma.invoice.count({
-        where: { workspaceId, status: InvoiceStatus.OVERDUE },
+        where: {
+          workspaceId,
+          status: InvoiceStatus.OVERDUE,
+          ...propertyFilter,
+        },
       }),
       this.prisma.payment.count({
-        where: { workspaceId, status: 'PENDING' },
+        where: { workspaceId, status: 'PENDING', ...propertyFilter },
       }),
       this.prisma.expense.aggregate({
-        where: { workspaceId, status: 'PAID' },
+        where: { workspaceId, status: 'PAID', ...propertyFilter },
         _sum: { amount: true },
       }),
     ]);
@@ -95,11 +121,18 @@ export class ReportsService {
   }
 
   async aging(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'report',
+      'view',
+    );
+    const propertyFilter = this.workspaces.propertyIdFilter(membership);
     const now = new Date();
     const invoices = await this.prisma.invoice.findMany({
       where: {
         workspaceId,
+        ...propertyFilter,
         status: {
           in: [
             InvoiceStatus.OPEN,
@@ -160,19 +193,23 @@ export class ReportsService {
     return { buckets, rows };
   }
 
-  async pnl(
-    auth: AuthUser,
-    workspaceId: string,
-    from?: string,
-    to?: string,
-  ) {
-    await this.workspaces.assertMember(auth, workspaceId);
-    const fromDate = from ? new Date(from) : new Date(new Date().getFullYear(), 0, 1);
+  async pnl(auth: AuthUser, workspaceId: string, from?: string, to?: string) {
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'report',
+      'view',
+    );
+    const propertyFilter = this.workspaces.propertyIdFilter(membership);
+    const fromDate = from
+      ? new Date(from)
+      : new Date(new Date().getFullYear(), 0, 1);
     const toDate = to ? new Date(to) : new Date();
     const [payments, expenses] = await Promise.all([
       this.prisma.payment.aggregate({
         where: {
           workspaceId,
+          ...propertyFilter,
           status: 'CONFIRMED',
           paidAt: { gte: fromDate, lte: toDate },
         },
@@ -182,6 +219,7 @@ export class ReportsService {
       this.prisma.expense.aggregate({
         where: {
           workspaceId,
+          ...propertyFilter,
           status: 'PAID',
           expenseDate: { gte: fromDate, lte: toDate },
         },
@@ -203,15 +241,23 @@ export class ReportsService {
   }
 
   async occupancyTrend(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'report',
+      'view',
+    );
+    const propertyFilter = this.workspaces.propertyIdFilter(membership);
     const rooms = await this.prisma.room.groupBy({
       by: ['status'],
-      where: { workspaceId, status: { not: 'INACTIVE' } },
+      where: {
+        workspaceId,
+        status: { not: 'INACTIVE' },
+        ...propertyFilter,
+      },
       _count: true,
     });
-    const byStatus = Object.fromEntries(
-      rooms.map((r) => [r.status, r._count]),
-    );
+    const byStatus = Object.fromEntries(rooms.map((r) => [r.status, r._count]));
     const total = rooms.reduce((s, r) => s + r._count, 0);
     const occupied = Number(byStatus['OCCUPIED'] ?? 0);
     return {
@@ -228,11 +274,18 @@ export class ReportsService {
     workspaceId: string,
     kind: 'invoices' | 'payments' | 'tenants' | 'expenses',
   ) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'report',
+      'export',
+    );
+    const propertyFilter = this.workspaces.propertyIdFilter(membership);
+    const propertyScope = this.workspaces.propertyScope(membership);
     let rows: string[][] = [];
     if (kind === 'invoices') {
       const data = await this.prisma.invoice.findMany({
-        where: { workspaceId },
+        where: { workspaceId, ...propertyFilter },
         include: { tenant: true },
         orderBy: { createdAt: 'desc' },
         take: 2000,
@@ -250,7 +303,7 @@ export class ReportsService {
       ];
     } else if (kind === 'payments') {
       const data = await this.prisma.payment.findMany({
-        where: { workspaceId },
+        where: { workspaceId, ...propertyFilter },
         include: { tenant: true },
         orderBy: { createdAt: 'desc' },
         take: 2000,
@@ -268,7 +321,20 @@ export class ReportsService {
       ];
     } else if (kind === 'tenants') {
       const data = await this.prisma.tenant.findMany({
-        where: { workspaceId },
+        where: {
+          workspaceId,
+          ...(propertyScope === null
+            ? {}
+            : {
+                leases: {
+                  some: {
+                    propertyId: {
+                      in: propertyScope.length ? propertyScope : ['__none__'],
+                    },
+                  },
+                },
+              }),
+        },
         take: 2000,
       });
       rows = [
@@ -282,7 +348,7 @@ export class ReportsService {
       ];
     } else {
       const data = await this.prisma.expense.findMany({
-        where: { workspaceId },
+        where: { workspaceId, ...propertyFilter },
         take: 2000,
       });
       rows = [
@@ -296,11 +362,17 @@ export class ReportsService {
         ]),
       ];
     }
-    const csv = rows
+    const csv = `\uFEFF${rows
       .map((r) =>
-        r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(','),
+        r
+          .map((c) => {
+            const value = String(c);
+            const safe = /^[=+\-@]/.test(value) ? `'${value}` : value;
+            return `"${safe.replace(/"/g, '""')}"`;
+          })
+          .join(','),
       )
-      .join('\n');
+      .join('\r\n')}`;
     const rowCount = Math.max(rows.length - 1, 0);
     const jobId = randomUUID();
     await this.queue.enqueue(
@@ -314,13 +386,6 @@ export class ReportsService {
       },
       { idempotencyKey: `export-${workspaceId}-${kind}-${jobId}` },
     );
-    return {
-      kind,
-      csv,
-      rowCount,
-      jobId,
-      async: true,
-      note: 'CSV inline + queued to outbox for durable audit',
-    };
+    return { csv, rowCount, jobId };
   }
 }

@@ -11,9 +11,11 @@ export class InventoryService {
   ) {}
 
   async list(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth, workspaceId, 'inventory', 'view',
+    );
     return this.prisma.inventoryItem.findMany({
-      where: { workspaceId },
+      where: { workspaceId, ...this.workspaces.propertyIdFilter(membership) },
       orderBy: { createdAt: 'desc' },
       include: {
         property: { select: { id: true, name: true } },
@@ -34,7 +36,20 @@ export class InventoryService {
       condition?: string;
     },
   ) {
-    await this.workspaces.assertMember(auth, input.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth, input.workspaceId, 'inventory', 'create',
+    );
+    this.workspaces.assertPropertyInScope(membership, input.propertyId);
+    const [property, room] = await Promise.all([
+      input.propertyId
+        ? this.prisma.property.findFirst({ where: { id: input.propertyId, workspaceId: input.workspaceId } })
+        : null,
+      input.roomId
+        ? this.prisma.room.findFirst({ where: { id: input.roomId, workspaceId: input.workspaceId, ...(input.propertyId ? { propertyId: input.propertyId } : {}) } })
+        : null,
+    ]);
+    if (input.propertyId && !property) throw new NotFoundException('Property not found');
+    if (input.roomId && !room) throw new NotFoundException('Room not found');
     return this.prisma.inventoryItem.create({
       data: {
         workspaceId: input.workspaceId,
@@ -64,7 +79,22 @@ export class InventoryService {
   ) {
     const item = await this.prisma.inventoryItem.findUnique({ where: { id } });
     if (!item) throw new NotFoundException();
-    await this.workspaces.assertMember(auth, item.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth, item.workspaceId, 'inventory', 'update',
+    );
+    this.workspaces.assertPropertyInScope(membership, item.propertyId);
+    const propertyId = data.propertyId === undefined ? item.propertyId : data.propertyId;
+    this.workspaces.assertPropertyInScope(membership, propertyId);
+    const [property, room] = await Promise.all([
+      propertyId
+        ? this.prisma.property.findFirst({ where: { id: propertyId, workspaceId: item.workspaceId } })
+        : null,
+      data.roomId
+        ? this.prisma.room.findFirst({ where: { id: data.roomId, workspaceId: item.workspaceId, ...(propertyId ? { propertyId } : {}) } })
+        : null,
+    ]);
+    if (propertyId && !property) throw new NotFoundException('Property not found');
+    if (data.roomId && !room) throw new NotFoundException('Room not found');
     return this.prisma.inventoryItem.update({ where: { id }, data });
   }
 

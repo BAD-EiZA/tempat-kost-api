@@ -13,6 +13,10 @@ import {
   SearchDsl,
 } from '../ports/ai-provider.port';
 
+const AI_REQUEST_TIMEOUT_MS = 15_000;
+
+class AiProviderRequestError extends Error {}
+
 @Injectable()
 export class GeminiFlashAdapter implements AiProviderPort {
   private readonly logger = new Logger(GeminiFlashAdapter.name);
@@ -37,7 +41,7 @@ export class GeminiFlashAdapter implements AiProviderPort {
     parts?: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }>,
   ): Promise<{ data: T; usageUnits: number }> {
     if (!this.apiKey) {
-      throw new Error('GEMINI_API_KEY missing');
+      throw new AiProviderRequestError('GEMINI_API_KEY missing');
     }
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`;
     const contentParts = parts?.length
@@ -47,25 +51,42 @@ export class GeminiFlashAdapter implements AiProviderPort {
       contentParts.unshift({ text: prompt });
     }
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: contentParts }],
-        generationConfig: {
-          temperature: 0.2,
-          responseMimeType: 'application/json',
-        },
-      }),
-    });
-    const json = (await res.json()) as {
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: contentParts }],
+          generationConfig: {
+            temperature: 0.2,
+            responseMimeType: 'application/json',
+          },
+        }),
+        signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
+      });
+    } catch (error) {
+      throw new AiProviderRequestError(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    let json: {
       candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
       usageMetadata?: { totalTokenCount?: number };
       error?: { message?: string };
     };
+    try {
+      json = (await res.json()) as typeof json;
+    } catch (error) {
+      throw new AiProviderRequestError(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
     if (!res.ok) {
       this.logger.warn(`Gemini error: ${json.error?.message ?? res.status}`);
-      throw new Error(json.error?.message ?? 'Gemini request failed');
+      throw new AiProviderRequestError(
+        json.error?.message ?? 'Gemini request failed',
+      );
     }
     const text =
       json.candidates?.[0]?.content?.parts?.map((p) => p.text ?? '').join('') ??
@@ -112,6 +133,7 @@ If unknown use null. Only JSON.`;
       return this.wrap(data, { overall: 0.7 }, usageUnits);
     } catch (e) {
       this.logger.warn(`extractPaymentProof fallback: ${String(e)}`);
+      if (e instanceof AiProviderRequestError) throw e;
       return this.wrap({});
     }
   }
@@ -140,7 +162,8 @@ Only JSON, null if unknown. Normalize NIK digits only.`;
       const { data, usageUnits } =
         await this.generateJson<IdentityExtraction>(prompt, parts);
       return this.wrap(data, { overall: 0.65 }, usageUnits);
-    } catch {
+    } catch (error) {
+      if (error instanceof AiProviderRequestError) throw error;
       return this.wrap({});
     }
   }
@@ -164,7 +187,8 @@ Amount: ${input.amount ?? ''}`;
         ];
       }
       return this.wrap(data, {}, usageUnits);
-    } catch {
+    } catch (error) {
+      if (error instanceof AiProviderRequestError) throw error;
       return this.wrap({
         categories: [{ key: 'other', label: 'Lainnya', confidence: 0.2 }],
       });
@@ -197,7 +221,8 @@ Context: ${JSON.stringify(input.context)}`;
         {},
         usageUnits,
       );
-    } catch {
+    } catch (error) {
+      if (error instanceof AiProviderRequestError) throw error;
       return this.wrap({
         body: `[Draft] ${input.purpose}`,
         tone: input.tone,
@@ -240,7 +265,8 @@ Hint: ${input.categoryHint ?? ''}`;
         {},
         usageUnits,
       );
-    } catch {
+    } catch (error) {
+      if (error instanceof AiProviderRequestError) throw error;
       return this.wrap({
         category: 'general',
         urgency: hazards.length ? 'high' : 'medium',
@@ -263,7 +289,8 @@ No blame assignment.`;
       const { data, usageUnits } =
         await this.generateJson<DamageAnalysis>(prompt);
       return this.wrap(data, {}, usageUnits);
-    } catch {
+    } catch (error) {
+      if (error instanceof AiProviderRequestError) throw error;
       return this.wrap({
         observations: [],
         uncertaintyNotes: ['Analysis unavailable'],
@@ -296,7 +323,8 @@ Price book: ${JSON.stringify(input.priceBook ?? [])}`;
         {},
         usageUnits,
       );
-    } catch {
+    } catch (error) {
+      if (error instanceof AiProviderRequestError) throw error;
       return this.wrap({
         lowAmount: 0,
         highAmount: 0,
@@ -330,7 +358,8 @@ Metrics: ${JSON.stringify(input.metrics)}`;
         {},
         usageUnits,
       );
-    } catch {
+    } catch (error) {
+      if (error instanceof AiProviderRequestError) throw error;
       return this.wrap({
         summary: `Ringkasan ${input.period}`,
         insights: Object.entries(input.metrics).map(
@@ -353,7 +382,8 @@ Never SQL. Query: ${input.query}`;
         data.entity = input.allowedEntities[0] ?? 'tenants';
       }
       return this.wrap(data, {}, usageUnits);
-    } catch {
+    } catch (error) {
+      if (error instanceof AiProviderRequestError) throw error;
       return this.wrap({
         entity: input.allowedEntities[0] ?? 'tenants',
         filters: { _rawQuery: input.query },
@@ -377,7 +407,8 @@ Samples: ${JSON.stringify(input.sampleRows.slice(0, 3))}`;
         mapping: Record<string, string | null>;
       }>(prompt);
       return this.wrap(data, {}, usageUnits);
-    } catch {
+    } catch (error) {
+      if (error instanceof AiProviderRequestError) throw error;
       const mapping: Record<string, string | null> = {};
       for (const field of input.targetFields) {
         const hit = input.headers.find(
@@ -424,7 +455,8 @@ No auto-price; advisory only.`;
         {},
         usageUnits,
       );
-    } catch {
+    } catch (error) {
+      if (error instanceof AiProviderRequestError) throw error;
       return this.wrap({
         low: input.currentRent,
         high: input.currentRent,

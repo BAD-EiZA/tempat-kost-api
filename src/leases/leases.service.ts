@@ -35,9 +35,11 @@ export class LeasesService {
   }
 
   async list(auth: AuthUser, workspaceId: string, propertyId?: string) {
-    const { membership } = await this.workspaces.assertMember(
+    const { membership } = await this.workspaces.assertPermission(
       auth,
       workspaceId,
+      'lease',
+      'view',
     );
     if (propertyId) {
       this.workspaces.assertPropertyInScope(membership, propertyId);
@@ -69,12 +71,24 @@ export class LeasesService {
       },
     });
     if (!lease) throw new NotFoundException('Lease not found');
-    await this.workspaces.assertMember(auth, lease.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      lease.workspaceId,
+      'lease',
+      'view',
+    );
+    this.workspaces.assertPropertyInScope(membership, lease.propertyId);
     return lease;
   }
 
   async create(auth: AuthUser, dto: CreateLeaseDto) {
-    const { user } = await this.workspaces.assertMember(auth, dto.workspaceId);
+    const { user, membership } = await this.workspaces.assertPermission(
+      auth,
+      dto.workspaceId,
+      'lease',
+      'create',
+    );
+    this.workspaces.assertPropertyInScope(membership, dto.propertyId);
 
     const [room, tenant] = await Promise.all([
       this.prisma.room.findFirst({
@@ -160,9 +174,11 @@ export class LeasesService {
       throw new BadRequestException('Cannot activate closed lease');
     }
 
-    const { user } = await this.workspaces.assertMember(
+    const { user } = await this.workspaces.assertPermission(
       auth,
       lease.workspaceId,
+      'lease',
+      'update',
     );
 
     const result = await this.prisma.$transaction(async (tx) => {
@@ -241,9 +257,11 @@ export class LeasesService {
     if (lease.status !== LeaseStatus.ACTIVE && lease.status !== LeaseStatus.ENDING_SOON) {
       throw new BadRequestException('Only active leases can be ended');
     }
-    const { user } = await this.workspaces.assertMember(
+    const { user } = await this.workspaces.assertPermission(
       auth,
       lease.workspaceId,
+      'lease',
+      'update',
     );
 
     const result = await this.prisma.$transaction(async (tx) => {

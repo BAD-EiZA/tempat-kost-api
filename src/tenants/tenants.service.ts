@@ -15,9 +15,11 @@ export class TenantsService {
   ) {}
 
   async list(auth: AuthUser, workspaceId: string) {
-    const { membership } = await this.workspaces.assertMember(
+    const { membership } = await this.workspaces.assertPermission(
       auth,
       workspaceId,
+      'tenant',
+      'view',
     );
     const scope = this.workspaces.propertyScope(membership);
     if (scope === null) {
@@ -56,12 +58,28 @@ export class TenantsService {
       },
     });
     if (!tenant) throw new NotFoundException('Tenant not found');
-    await this.workspaces.assertMember(auth, tenant.workspaceId);
-    return tenant;
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      tenant.workspaceId,
+      'tenant',
+      'view',
+    );
+    const scope = this.workspaces.propertyScope(membership);
+    if (scope && tenant.leases.length && !tenant.leases.some((l) => scope.includes(l.propertyId))) {
+      throw new NotFoundException('Tenant not found');
+    }
+    return scope
+      ? { ...tenant, leases: tenant.leases.filter((l) => scope.includes(l.propertyId)) }
+      : tenant;
   }
 
   async create(auth: AuthUser, dto: CreateTenantDto) {
-    const { user } = await this.workspaces.assertMember(auth, dto.workspaceId);
+    const { user } = await this.workspaces.assertPermission(
+      auth,
+      dto.workspaceId,
+      'tenant',
+      'create',
+    );
     const tenant = await this.prisma.tenant.create({
       data: {
         workspaceId: dto.workspaceId,
@@ -86,9 +104,11 @@ export class TenantsService {
 
   async update(auth: AuthUser, id: string, dto: UpdateTenantDto) {
     const existing = await this.get(auth, id);
-    const { user } = await this.workspaces.assertMember(
+    const { user } = await this.workspaces.assertPermission(
       auth,
       existing.workspaceId,
+      'tenant',
+      'update',
     );
     const tenant = await this.prisma.tenant.update({
       where: { id },

@@ -16,11 +16,14 @@ export class MetersService {
   ) {}
 
   async listMeters(auth: AuthUser, workspaceId: string, propertyId?: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth, workspaceId, 'utility', 'view',
+    );
+    if (propertyId) this.workspaces.assertPropertyInScope(membership, propertyId);
     return this.prisma.utilityMeter.findMany({
       where: {
         workspaceId,
-        ...(propertyId ? { propertyId } : {}),
+        ...(propertyId ? { propertyId } : this.workspaces.propertyIdFilter(membership)),
         isActive: true,
       },
       include: {
@@ -41,7 +44,18 @@ export class MetersService {
       meterNumber?: string;
     },
   ) {
-    await this.workspaces.assertMember(auth, input.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth, input.workspaceId, 'utility', 'create',
+    );
+    this.workspaces.assertPropertyInScope(membership, input.propertyId);
+    const [property, room] = await Promise.all([
+      this.prisma.property.findFirst({ where: { id: input.propertyId, workspaceId: input.workspaceId } }),
+      input.roomId
+        ? this.prisma.room.findFirst({ where: { id: input.roomId, workspaceId: input.workspaceId, propertyId: input.propertyId } })
+        : null,
+    ]);
+    if (!property) throw new NotFoundException('Property not found');
+    if (input.roomId && !room) throw new NotFoundException('Room not found');
     return this.prisma.utilityMeter.create({
       data: {
         workspaceId: input.workspaceId,
@@ -67,7 +81,10 @@ export class MetersService {
       where: { id: input.meterId },
     });
     if (!meter) throw new NotFoundException('Meter not found');
-    await this.workspaces.assertMember(auth, meter.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth, meter.workspaceId, 'utility', 'create',
+    );
+    this.workspaces.assertPropertyInScope(membership, meter.propertyId);
 
     if (input.currentReading < input.previousReading) {
       throw new BadRequestException(
@@ -98,7 +115,10 @@ export class MetersService {
       include: { meter: true },
     });
     if (!reading) throw new NotFoundException('Reading not found');
-    await this.workspaces.assertMember(auth, reading.meter.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth, reading.meter.workspaceId, 'utility', 'approve',
+    );
+    this.workspaces.assertPropertyInScope(membership, reading.meter.propertyId);
     return this.prisma.meterReading.update({
       where: { id },
       data: { status: 'VERIFIED', verifiedAt: new Date() },

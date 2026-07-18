@@ -29,9 +29,11 @@ export class InvoicesService {
   }
 
   async list(auth: AuthUser, workspaceId: string) {
-    const { membership } = await this.workspaces.assertMember(
+    const { membership } = await this.workspaces.assertPermission(
       auth,
       workspaceId,
+      'invoice',
+      'view',
     );
     return this.prisma.invoice.findMany({
       where: {
@@ -59,21 +61,43 @@ export class InvoicesService {
       },
     });
     if (!invoice) throw new NotFoundException('Invoice not found');
-    await this.workspaces.assertMember(auth, invoice.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      invoice.workspaceId,
+      'invoice',
+      'view',
+    );
+    this.workspaces.assertPropertyInScope(membership, invoice.propertyId);
     return invoice;
   }
 
   async create(auth: AuthUser, dto: CreateInvoiceDto) {
-    const { user } = await this.workspaces.assertMember(auth, dto.workspaceId);
+    const { user, membership } = await this.workspaces.assertPermission(
+      auth,
+      dto.workspaceId,
+      'invoice',
+      'create',
+    );
+    this.workspaces.assertPropertyInScope(membership, dto.propertyId);
     if (!dto.items?.length) {
       throw new BadRequestException('Invoice needs at least one item');
     }
 
-    if (dto.leaseId) {
-      const lease = await this.prisma.lease.findFirst({
-        where: { id: dto.leaseId, workspaceId: dto.workspaceId },
-      });
-      if (!lease) throw new NotFoundException('Lease not found');
+    const [property, tenant, lease] = await Promise.all([
+      dto.propertyId
+        ? this.prisma.property.findFirst({ where: { id: dto.propertyId, workspaceId: dto.workspaceId } })
+        : null,
+      dto.tenantId
+        ? this.prisma.tenant.findFirst({ where: { id: dto.tenantId, workspaceId: dto.workspaceId } })
+        : null,
+      dto.leaseId
+        ? this.prisma.lease.findFirst({ where: { id: dto.leaseId, workspaceId: dto.workspaceId } })
+        : null,
+    ]);
+    if (dto.propertyId && !property) throw new NotFoundException('Property not found');
+    if (dto.tenantId && !tenant) throw new NotFoundException('Tenant not found');
+    if (dto.leaseId && (!lease || lease.propertyId !== dto.propertyId || lease.tenantId !== dto.tenantId)) {
+      throw new NotFoundException('Lease not found');
     }
 
     let subtotal = new Prisma.Decimal(0);
@@ -126,9 +150,11 @@ export class InvoicesService {
     if (invoice.status !== InvoiceStatus.DRAFT && invoice.status !== InvoiceStatus.SCHEDULED) {
       throw new BadRequestException('Only draft/scheduled invoices can be issued');
     }
-    const { user } = await this.workspaces.assertMember(
+    const { user } = await this.workspaces.assertPermission(
       auth,
       invoice.workspaceId,
+      'invoice',
+      'update',
     );
     const updated = await this.prisma.invoice.update({
       where: { id },
@@ -154,9 +180,11 @@ export class InvoicesService {
       throw new BadRequestException('Cannot void paid invoice');
     }
     if (invoice.status === InvoiceStatus.VOID) return invoice;
-    const { user } = await this.workspaces.assertMember(
+    const { user } = await this.workspaces.assertPermission(
       auth,
       invoice.workspaceId,
+      'invoice',
+      'update',
     );
     const updated = await this.prisma.invoice.update({
       where: { id },
@@ -178,7 +206,13 @@ export class InvoicesService {
   async createFromLease(auth: AuthUser, leaseId: string) {
     const lease = await this.prisma.lease.findUnique({ where: { id: leaseId } });
     if (!lease) throw new NotFoundException('Lease not found');
-    await this.workspaces.assertMember(auth, lease.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      lease.workspaceId,
+      'invoice',
+      'create',
+    );
+    this.workspaces.assertPropertyInScope(membership, lease.propertyId);
 
     const issueDate = new Date();
     const dueDate = new Date(issueDate);
@@ -214,9 +248,11 @@ export class InvoicesService {
     ) {
       throw new BadRequestException('Cannot adjust void/paid invoice');
     }
-    const { user } = await this.workspaces.assertMember(
+    const { user } = await this.workspaces.assertPermission(
       auth,
       invoice.workspaceId,
+      'invoice',
+      'update',
     );
     const amount = this.money(input.amount);
     const updated = await this.prisma.$transaction(async (tx) => {
@@ -274,6 +310,12 @@ export class InvoicesService {
   async markOverdue(auth: AuthUser, invoiceId: string) {
     const invoice = await this.get(auth, invoiceId);
     if (invoice.status !== InvoiceStatus.OPEN) return invoice;
+    await this.workspaces.assertPermission(
+      auth,
+      invoice.workspaceId,
+      'invoice',
+      'update',
+    );
     return this.prisma.invoice.update({
       where: { id: invoiceId },
       data: { status: InvoiceStatus.OVERDUE },

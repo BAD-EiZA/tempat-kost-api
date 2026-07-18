@@ -40,9 +40,11 @@ export class RoomsService {
     workspaceId: string,
     propertyId?: string,
   ) {
-    const { membership } = await this.workspaces.assertMember(
+    const { membership } = await this.workspaces.assertPermission(
       auth,
       workspaceId,
+      'room',
+      'view',
     );
     const scope = this.workspaces.propertyScope(membership);
     if (propertyId) {
@@ -81,7 +83,13 @@ export class RoomsService {
     if (!room) {
       throw new NotFoundException('Room not found');
     }
-    await this.workspaces.assertMember(auth, room.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      room.workspaceId,
+      'room',
+      'view',
+    );
+    this.workspaces.assertPropertyInScope(membership, room.propertyId);
     return room;
   }
 
@@ -95,6 +103,24 @@ export class RoomsService {
     this.workspaces.assertPropertyInScope(membership, dto.propertyId);
     await this.subscriptions.assertCanCreateRoom(dto.workspaceId);
     await this.assertProperty(dto.workspaceId, dto.propertyId);
+    if (dto.roomTypeId) {
+      const roomType = await this.prisma.roomType.findFirst({
+        where: { id: dto.roomTypeId, workspaceId: dto.workspaceId },
+      });
+      if (!roomType) throw new NotFoundException('Room type not found');
+    }
+    if (dto.buildingId) {
+      const building = await this.prisma.building.findFirst({
+        where: { id: dto.buildingId, workspaceId: dto.workspaceId, propertyId: dto.propertyId },
+      });
+      if (!building) throw new NotFoundException('Building not found');
+    }
+    if (dto.floorId) {
+      const floor = await this.prisma.floor.findFirst({
+        where: { id: dto.floorId, building: { workspaceId: dto.workspaceId, propertyId: dto.propertyId } },
+      });
+      if (!floor) throw new NotFoundException('Floor not found');
+    }
 
     const code = (dto.code || dto.name).trim().toUpperCase();
     const exists = await this.prisma.room.findUnique({
@@ -138,7 +164,13 @@ export class RoomsService {
     if (dto.count > 100) {
       throw new BadRequestException('Max 100 rooms per bulk create');
     }
-    const { user } = await this.workspaces.assertMember(auth, dto.workspaceId);
+    const { user, membership } = await this.workspaces.assertPermission(
+      auth,
+      dto.workspaceId,
+      'room',
+      'create',
+    );
+    this.workspaces.assertPropertyInScope(membership, dto.propertyId);
     await this.subscriptions.assertCanCreateRoom(dto.workspaceId);
     await this.assertProperty(dto.workspaceId, dto.propertyId);
 
@@ -189,10 +221,30 @@ export class RoomsService {
 
   async update(auth: AuthUser, id: string, dto: UpdateRoomDto) {
     const existing = await this.get(auth, id);
-    const { user } = await this.workspaces.assertMember(
+    const { user } = await this.workspaces.assertPermission(
       auth,
       existing.workspaceId,
+      'room',
+      'update',
     );
+    if (dto.roomTypeId) {
+      const roomType = await this.prisma.roomType.findFirst({
+        where: { id: dto.roomTypeId, workspaceId: existing.workspaceId },
+      });
+      if (!roomType) throw new NotFoundException('Room type not found');
+    }
+    if (dto.buildingId) {
+      const building = await this.prisma.building.findFirst({
+        where: { id: dto.buildingId, workspaceId: existing.workspaceId, propertyId: existing.propertyId },
+      });
+      if (!building) throw new NotFoundException('Building not found');
+    }
+    if (dto.floorId) {
+      const floor = await this.prisma.floor.findFirst({
+        where: { id: dto.floorId, building: { workspaceId: existing.workspaceId, propertyId: existing.propertyId } },
+      });
+      if (!floor) throw new NotFoundException('Floor not found');
+    }
 
     const room = await this.prisma.room.update({
       where: { id },

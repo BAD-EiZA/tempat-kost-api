@@ -83,7 +83,12 @@ export class SubscriptionsService implements OnModuleInit {
   }
 
   async getForWorkspace(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'subscription',
+      'view',
+    );
     return this.ensureTrial(workspaceId);
   }
 

@@ -146,4 +146,41 @@ export class NotificationsService {
       ),
     );
   }
+
+  async notifyTenantPortal(
+    tenantId: string,
+    title: string,
+    body: string,
+    entityType: string,
+    entityId: string,
+  ) {
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { workspaceId: true, portalUserId: true },
+    });
+    if (!tenant?.portalUserId) return false;
+
+    const exists = await this.prisma.notification.findFirst({
+      where: {
+        workspaceId: tenant.workspaceId,
+        userId: tenant.portalUserId,
+        title,
+        body,
+        entityType,
+        entityId,
+      },
+      select: { id: true },
+    });
+    if (exists) return false;
+
+    await this.createInApp({
+      workspaceId: tenant.workspaceId,
+      userId: tenant.portalUserId,
+      title,
+      body,
+      entityType,
+      entityId,
+    });
+    return true;
+  }
 }

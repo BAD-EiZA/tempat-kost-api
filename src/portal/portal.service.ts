@@ -84,6 +84,7 @@ export class PortalService {
         where: { id: tenantId },
         data: { portalUserId: user.id },
       });
+      tenant.portalUserId = user.id;
     }
     return tenant;
   }
@@ -149,6 +150,46 @@ export class PortalService {
       where: { tenantId },
       orderBy: { createdAt: 'desc' },
       include: { items: true },
+    });
+  }
+
+  async notifications(auth: AuthUser, tenantId: string) {
+    const tenant = await this.assertPortalTenant(auth, tenantId);
+    const invoiceIds = await this.prisma.invoice.findMany({
+      where: { tenantId },
+      select: { id: true },
+    });
+    return this.prisma.notification.findMany({
+      where: {
+        workspaceId: tenant.workspaceId,
+        userId: tenant.portalUserId,
+        entityType: 'invoice',
+        entityId: { in: invoiceIds.map((invoice) => invoice.id) },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+  }
+
+  async readNotification(auth: AuthUser, tenantId: string, id: string) {
+    const tenant = await this.assertPortalTenant(auth, tenantId);
+    const notification = await this.prisma.notification.findFirst({
+      where: {
+        id,
+        workspaceId: tenant.workspaceId,
+        userId: tenant.portalUserId,
+        entityType: 'invoice',
+        entityId: { in: (await this.prisma.invoice.findMany({
+          where: { tenantId },
+          select: { id: true },
+        })).map((invoice) => invoice.id) },
+      },
+      select: { id: true },
+    });
+    if (!notification) throw new NotFoundException('Notification not found');
+    return this.prisma.notification.update({
+      where: { id },
+      data: { status: 'READ', readAt: new Date() },
     });
   }
 

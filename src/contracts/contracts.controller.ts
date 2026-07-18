@@ -7,7 +7,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
-import { IsNotEmpty, IsString } from 'class-validator';
+import { IsNotEmpty, IsString, MaxLength } from 'class-validator';
 import { ClerkAuthGuard } from '../common/auth/clerk-auth.guard';
 import { CurrentUser } from '../common/auth/current-user.decorator';
 import type { AuthUser } from '../common/auth/auth.types';
@@ -23,10 +23,12 @@ class GenerateDto {
 class SignDto {
   @IsString()
   @IsNotEmpty()
+  @MaxLength(150)
   signerName!: string;
 
   @IsString()
   @IsNotEmpty()
+  @MaxLength(500_000)
   signatureData!: string;
 }
 

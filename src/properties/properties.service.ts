@@ -30,9 +30,11 @@ export class PropertiesService {
   }
 
   async list(auth: AuthUser, workspaceId: string) {
-    const { membership } = await this.workspaces.assertMember(
+    const { membership } = await this.workspaces.assertPermission(
       auth,
       workspaceId,
+      'property',
+      'view',
     );
     const scope = this.workspaces.propertyScope(membership);
     return this.prisma.property.findMany({
@@ -56,9 +58,11 @@ export class PropertiesService {
     if (!property) {
       throw new NotFoundException('Property not found');
     }
-    const { membership } = await this.workspaces.assertMember(
+    const { membership } = await this.workspaces.assertPermission(
       auth,
       property.workspaceId,
+      'property',
+      'view',
     );
     const scope = this.workspaces.propertyScope(membership);
     if (scope && !scope.includes(id)) {
@@ -68,7 +72,12 @@ export class PropertiesService {
   }
 
   async create(auth: AuthUser, dto: CreatePropertyDto) {
-    const { user } = await this.workspaces.assertMember(auth, dto.workspaceId);
+    const { user } = await this.workspaces.assertPermission(
+      auth,
+      dto.workspaceId,
+      'property',
+      'create',
+    );
     await this.subscriptions.assertCanCreateProperty(dto.workspaceId);
     const baseCode = this.codeify(dto.code || dto.name) || 'PROP';
     let code = baseCode;
@@ -122,9 +131,11 @@ export class PropertiesService {
 
   async update(auth: AuthUser, id: string, dto: UpdatePropertyDto) {
     const existing = await this.get(auth, id);
-    const { user } = await this.workspaces.assertMember(
+    const { user } = await this.workspaces.assertPermission(
       auth,
       existing.workspaceId,
+      'property',
+      'update',
     );
 
     const property = await this.prisma.property.update({
@@ -153,9 +164,11 @@ export class PropertiesService {
 
   async archive(auth: AuthUser, id: string) {
     const existing = await this.get(auth, id);
-    const { user } = await this.workspaces.assertMember(
+    const { user } = await this.workspaces.assertPermission(
       auth,
       existing.workspaceId,
+      'property',
+      'delete',
     );
 
     const property = await this.prisma.property.update({

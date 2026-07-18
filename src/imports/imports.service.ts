@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { AuthUser } from '../common/auth/auth.types';
 import {
   AI_PROVIDER_PORT,
@@ -59,7 +59,12 @@ export class ImportsService {
       rows: string[][];
     },
   ) {
-    await this.workspaces.assertMember(auth, input.workspaceId);
+    await this.workspaces.assertPermission(
+      auth,
+      input.workspaceId,
+      'workspace',
+      'manage_settings',
+    );
     const targetFields = TARGETS[input.kind];
 
     const mapped = await this.ai.mapSpreadsheetColumns({
@@ -155,10 +160,24 @@ export class ImportsService {
       rows: string[][];
     },
   ) {
-    const { user } = await this.workspaces.assertMember(
+    const { user, membership } = await this.workspaces.assertPermission(
       auth,
       input.workspaceId,
+      'workspace',
+      'manage_settings',
     );
+    const propertyFilter = this.workspaces.propertyIdFilter(membership);
+    if (input.propertyId) {
+      const property = await this.prisma.property.findFirst({
+        where: {
+          id: input.propertyId,
+          workspaceId: input.workspaceId,
+          ...propertyFilter,
+        },
+        select: { id: true },
+      });
+      if (!property) throw new NotFoundException('Property not found');
+    }
     const job = await this.prisma.importJob.findFirst({
       where: { id: input.jobId, workspaceId: input.workspaceId },
     });
@@ -295,7 +314,7 @@ export class ImportsService {
             throw new Error('amount required');
           const tenantName = row[headerIndex('tenantName')]?.trim();
           let tenantId: string | undefined;
-          let propertyId: string | undefined;
+           let propertyId: string | undefined = input.propertyId;
           let invoiceId: string | undefined;
           if (tenantName) {
             const t = await this.prisma.tenant.findFirst({
@@ -312,6 +331,7 @@ export class ImportsService {
               where: {
                 workspaceId: input.workspaceId,
                 invoiceNumber: invNo,
+                ...propertyFilter,
               },
             });
             if (inv) {
@@ -322,7 +342,7 @@ export class ImportsService {
           }
           if (!propertyId) {
             const prop = await this.prisma.property.findFirst({
-              where: { workspaceId: input.workspaceId },
+              where: { workspaceId: input.workspaceId, ...propertyFilter },
             });
             propertyId = prop?.id;
           }
@@ -374,12 +394,13 @@ export class ImportsService {
           const amount = Number(row[headerIndex('amount')] ?? NaN);
           if (!category || !Number.isFinite(amount))
             throw new Error('category+amount required');
-          let propertyId: string | undefined;
+           let propertyId: string | undefined = input.propertyId;
           const propName = row[headerIndex('propertyName')]?.trim();
           if (propName) {
             const p = await this.prisma.property.findFirst({
               where: {
                 workspaceId: input.workspaceId,
+                ...propertyFilter,
                 name: { equals: propName, mode: 'insensitive' },
               },
             });

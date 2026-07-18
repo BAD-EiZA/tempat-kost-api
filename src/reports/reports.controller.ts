@@ -1,4 +1,5 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query, Res, UseGuards } from '@nestjs/common';
+import type { Response } from 'express';
 import { IsIn, IsNotEmpty, IsString } from 'class-validator';
 import { ClerkAuthGuard } from '../common/auth/clerk-auth.guard';
 import { CurrentUser } from '../common/auth/current-user.decorator';
@@ -40,15 +41,26 @@ export class ReportsController {
   }
 
   @Get('occupancy')
-  occupancy(
-    @CurrentUser() user: AuthUser,
-    @Query() query: WorkspaceQueryDto,
-  ) {
+  occupancy(@CurrentUser() user: AuthUser, @Query() query: WorkspaceQueryDto) {
     return this.reports.occupancyTrend(user, query.workspaceId);
   }
 
   @Get('export')
-  export(@CurrentUser() user: AuthUser, @Query() query: ExportQueryDto) {
-    return this.reports.exportCsv(user, query.workspaceId, query.kind);
+  async export(
+    @CurrentUser() user: AuthUser,
+    @Query() query: ExportQueryDto,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const result = await this.reports.exportCsv(
+      user,
+      query.workspaceId,
+      query.kind,
+    );
+    response.type('text/csv; charset=utf-8');
+    response.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${query.kind}-${new Date().toISOString().slice(0, 10)}.csv"`,
+    );
+    return result.csv;
   }
 }

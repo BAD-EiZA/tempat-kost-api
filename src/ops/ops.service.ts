@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { DepositTxnType, Prisma } from '@prisma/client';
 import type { AuthUser } from '../common/auth/auth.types';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { WorkspacesService } from '../workspaces/workspaces.service';
@@ -12,9 +17,14 @@ export class OpsService {
 
   // ── packages ──
   async listPackages(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'property',
+      'view',
+    );
     return this.prisma.packageLog.findMany({
-      where: { workspaceId },
+      where: { workspaceId, ...this.workspaces.propertyIdFilter(membership) },
       orderBy: { createdAt: 'desc' },
       take: 100,
     });
@@ -30,9 +40,11 @@ export class OpsService {
       notes?: string;
     },
   ) {
-    const { user } = await this.workspaces.assertMember(
+    const { user } = await this.workspaces.assertPermission(
       auth,
       input.workspaceId,
+      'property',
+      'update',
     );
     return this.prisma.packageLog.create({
       data: {
@@ -49,7 +61,13 @@ export class OpsService {
   async pickupPackage(auth: AuthUser, id: string) {
     const pkg = await this.prisma.packageLog.findUnique({ where: { id } });
     if (!pkg) throw new NotFoundException();
-    await this.workspaces.assertMember(auth, pkg.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      pkg.workspaceId,
+      'property',
+      'update',
+    );
+    this.workspaces.assertPropertyInScope(membership, pkg.propertyId);
     return this.prisma.packageLog.update({
       where: { id },
       data: { pickedUp: true },
@@ -58,9 +76,14 @@ export class OpsService {
 
   // ── guests ──
   async listGuests(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'property',
+      'view',
+    );
     return this.prisma.guestLog.findMany({
-      where: { workspaceId },
+      where: { workspaceId, ...this.workspaces.propertyIdFilter(membership) },
       orderBy: { checkInAt: 'desc' },
       take: 100,
     });
@@ -76,7 +99,12 @@ export class OpsService {
       notes?: string;
     },
   ) {
-    await this.workspaces.assertMember(auth, input.workspaceId);
+    await this.workspaces.assertPermission(
+      auth,
+      input.workspaceId,
+      'property',
+      'update',
+    );
     return this.prisma.guestLog.create({
       data: {
         workspaceId: input.workspaceId,
@@ -91,7 +119,13 @@ export class OpsService {
   async checkoutGuest(auth: AuthUser, id: string) {
     const g = await this.prisma.guestLog.findUnique({ where: { id } });
     if (!g) throw new NotFoundException();
-    await this.workspaces.assertMember(auth, g.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      g.workspaceId,
+      'property',
+      'update',
+    );
+    this.workspaces.assertPropertyInScope(membership, g.propertyId);
     return this.prisma.guestLog.update({
       where: { id },
       data: { checkOutAt: new Date() },
@@ -100,7 +134,7 @@ export class OpsService {
 
   // ── announcements ──
   async listAnnouncements(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    await this.workspaces.assertPermission(auth, workspaceId, 'report', 'view');
     return this.prisma.announcement.findMany({
       where: { workspaceId },
       orderBy: { createdAt: 'desc' },
@@ -109,9 +143,19 @@ export class OpsService {
 
   async createAnnouncement(
     auth: AuthUser,
-    input: { workspaceId: string; title: string; body: string; publish?: boolean },
+    input: {
+      workspaceId: string;
+      title: string;
+      body: string;
+      publish?: boolean;
+    },
   ) {
-    await this.workspaces.assertMember(auth, input.workspaceId);
+    await this.workspaces.assertPermission(
+      auth,
+      input.workspaceId,
+      'workspace',
+      'manage_settings',
+    );
     return this.prisma.announcement.create({
       data: {
         workspaceId: input.workspaceId,
@@ -125,7 +169,12 @@ export class OpsService {
   async publishAnnouncement(auth: AuthUser, id: string) {
     const a = await this.prisma.announcement.findUnique({ where: { id } });
     if (!a) throw new NotFoundException();
-    await this.workspaces.assertMember(auth, a.workspaceId);
+    await this.workspaces.assertPermission(
+      auth,
+      a.workspaceId,
+      'workspace',
+      'manage_settings',
+    );
     return this.prisma.announcement.update({
       where: { id },
       data: { publishedAt: new Date() },
@@ -134,9 +183,14 @@ export class OpsService {
 
   // ── surveys ──
   async listSurveys(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'property',
+      'view',
+    );
     return this.prisma.surveySchedule.findMany({
-      where: { workspaceId },
+      where: { workspaceId, ...this.workspaces.propertyIdFilter(membership) },
       orderBy: { scheduledAt: 'asc' },
     });
   }
@@ -151,7 +205,27 @@ export class OpsService {
       staffNote?: string;
     },
   ) {
-    await this.workspaces.assertMember(auth, input.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      input.workspaceId,
+      'property',
+      'update',
+    );
+    this.workspaces.assertPropertyInScope(membership, input.propertyId);
+    const [property, prospect] = await Promise.all([
+      input.propertyId
+        ? this.prisma.property.findFirst({
+            where: { id: input.propertyId, workspaceId: input.workspaceId },
+          })
+        : null,
+      input.prospectId
+        ? this.prisma.prospect.findFirst({
+            where: { id: input.prospectId, workspaceId: input.workspaceId },
+          })
+        : null,
+    ]);
+    if (input.propertyId && !property) throw new NotFoundException();
+    if (input.prospectId && !prospect) throw new NotFoundException();
     return this.prisma.surveySchedule.create({
       data: {
         workspaceId: input.workspaceId,
@@ -165,7 +239,7 @@ export class OpsService {
 
   // ── inspections ──
   async listTemplates(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    await this.workspaces.assertPermission(auth, workspaceId, 'property', 'view');
     return this.prisma.inspectionTemplate.findMany({
       where: { workspaceId },
     });
@@ -180,7 +254,12 @@ export class OpsService {
       items: Array<{ label: string; requiredPhoto?: boolean }>;
     },
   ) {
-    await this.workspaces.assertMember(auth, input.workspaceId);
+    await this.workspaces.assertPermission(
+      auth,
+      input.workspaceId,
+      'property',
+      'update',
+    );
     return this.prisma.inspectionTemplate.create({
       data: {
         workspaceId: input.workspaceId,
@@ -205,7 +284,49 @@ export class OpsService {
       complete?: boolean;
     },
   ) {
-    await this.workspaces.assertMember(auth, input.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      input.workspaceId,
+      'property',
+      'update',
+    );
+    this.workspaces.assertPropertyInScope(membership, input.propertyId);
+    const [template, property, room, lease] = await Promise.all([
+      input.templateId
+        ? this.prisma.inspectionTemplate.findFirst({
+            where: { id: input.templateId, workspaceId: input.workspaceId },
+          })
+        : null,
+      input.propertyId
+        ? this.prisma.property.findFirst({
+            where: { id: input.propertyId, workspaceId: input.workspaceId },
+          })
+        : null,
+      input.roomId
+        ? this.prisma.room.findFirst({
+            where: {
+              id: input.roomId,
+              workspaceId: input.workspaceId,
+              ...(input.propertyId ? { propertyId: input.propertyId } : {}),
+            },
+          })
+        : null,
+      input.leaseId
+        ? this.prisma.lease.findFirst({
+            where: {
+              id: input.leaseId,
+              workspaceId: input.workspaceId,
+              ...(input.propertyId ? { propertyId: input.propertyId } : {}),
+            },
+          })
+        : null,
+    ]);
+    if (input.templateId && !template) throw new NotFoundException();
+    if (input.propertyId && !property) throw new NotFoundException();
+    if (input.roomId && !room) throw new NotFoundException();
+    if (input.leaseId && !lease) throw new NotFoundException();
+    if (room) this.workspaces.assertPropertyInScope(membership, room.propertyId);
+    if (lease) this.workspaces.assertPropertyInScope(membership, lease.propertyId);
     return this.prisma.inspection.create({
       data: {
         workspaceId: input.workspaceId,
@@ -223,9 +344,14 @@ export class OpsService {
   }
 
   async listInspections(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'property',
+      'view',
+    );
     return this.prisma.inspection.findMany({
-      where: { workspaceId },
+      where: { workspaceId, ...this.workspaces.propertyIdFilter(membership) },
       orderBy: { createdAt: 'desc' },
       include: { template: { select: { name: true } } },
     });
@@ -233,7 +359,7 @@ export class OpsService {
 
   // ── approvals ──
   async listApprovals(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    await this.workspaces.assertPermission(auth, workspaceId, 'expense', 'view');
     return this.prisma.approvalRequest.findMany({
       where: { workspaceId },
       orderBy: { createdAt: 'desc' },
@@ -252,9 +378,11 @@ export class OpsService {
       note?: string;
     },
   ) {
-    const { user } = await this.workspaces.assertMember(
+    const { user } = await this.workspaces.assertPermission(
       auth,
       input.workspaceId,
+      'expense',
+      'create',
     );
     return this.prisma.approvalRequest.create({
       data: {
@@ -278,26 +406,99 @@ export class OpsService {
   ) {
     const req = await this.prisma.approvalRequest.findUnique({ where: { id } });
     if (!req) throw new NotFoundException();
-    const { user } = await this.workspaces.assertPermission(
+    const { user, membership } = await this.workspaces.assertPermission(
       auth,
       req.workspaceId,
       'expense',
       'approve',
     );
-    return this.prisma.approvalRequest.update({
-      where: { id },
-      data: {
-        status,
-        decidedBy: user.id,
-        decidedAt: new Date(),
-        note: note ?? req.note,
-      },
+    if (req.status !== 'pending') return req;
+    return this.prisma.$transaction(async (tx) => {
+      const decided = await tx.approvalRequest.updateMany({
+        where: { id, status: 'pending' },
+        data: {
+          status,
+          decidedBy: user.id,
+          decidedAt: new Date(),
+          note: note ?? req.note,
+        },
+      });
+      if (decided.count === 0) {
+        return tx.approvalRequest.findUniqueOrThrow({ where: { id } });
+      }
+
+      if (status === 'approved' && req.kind === 'deposit_deduction') {
+        const payload = req.payload as {
+          damageAmount?: number;
+          reason?: string;
+          refundAmount?: number;
+        } | null;
+        const damage = new Prisma.Decimal(payload?.damageAmount ?? 0);
+        const account = await tx.depositAccount.findUnique({
+          where: { id: req.entityId },
+          include: { lease: { select: { propertyId: true } } },
+        });
+        if (
+          !account ||
+          account.workspaceId !== req.workspaceId ||
+          damage.lessThanOrEqualTo(0)
+        ) {
+          throw new BadRequestException('Invalid deposit deduction approval');
+        }
+        this.workspaces.assertPropertyInScope(
+          membership,
+          account.lease.propertyId,
+        );
+        const afterDamage = new Prisma.Decimal(account.balance).sub(damage);
+        if (afterDamage.lessThan(0)) {
+          throw new BadRequestException('Deposit balance cannot go negative');
+        }
+        const refund =
+          payload?.refundAmount === undefined
+            ? afterDamage
+            : new Prisma.Decimal(payload.refundAmount);
+        if (refund.lessThan(0) || refund.greaterThan(afterDamage)) {
+          throw new BadRequestException('Invalid deposit refund amount');
+        }
+        const finalBalance = afterDamage.sub(refund);
+        await tx.depositAccount.update({
+          where: { id: account.id },
+          data: { balance: finalBalance },
+        });
+        await tx.depositTransaction.create({
+          data: {
+            depositAccountId: account.id,
+            type: DepositTxnType.DEDUCTION,
+            amount: damage,
+            balanceAfter: afterDamage,
+            reason: payload?.reason ?? 'Approved checkout damage',
+          },
+        });
+        if (refund.greaterThan(0)) {
+          await tx.depositTransaction.create({
+            data: {
+              depositAccountId: account.id,
+              type: DepositTxnType.REFUND,
+              amount: refund,
+              balanceAfter: finalBalance,
+              reason: 'Checkout refund',
+            },
+          });
+        }
+      }
+
+      return tx.approvalRequest.findUniqueOrThrow({ where: { id } });
     });
   }
 
   // ── feature flags ──
   async listFlags(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'workspace',
+      'manage_settings',
+    );
     return this.prisma.workspaceFeatureFlag.findMany({
       where: { workspaceId },
     });
@@ -331,9 +532,14 @@ export class OpsService {
 
   // ── recurring expenses ──
   async listRecurring(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'expense',
+      'view',
+    );
     return this.prisma.recurringExpense.findMany({
-      where: { workspaceId },
+      where: { workspaceId, ...this.workspaces.propertyIdFilter(membership) },
       orderBy: { nextDate: 'asc' },
     });
   }
@@ -351,7 +557,19 @@ export class OpsService {
       propertyId?: string;
     },
   ) {
-    await this.workspaces.assertMember(auth, input.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      input.workspaceId,
+      'expense',
+      'create',
+    );
+    this.workspaces.assertPropertyInScope(membership, input.propertyId);
+    if (input.propertyId) {
+      const property = await this.prisma.property.findFirst({
+        where: { id: input.propertyId, workspaceId: input.workspaceId },
+      });
+      if (!property) throw new NotFoundException();
+    }
     return this.prisma.recurringExpense.create({
       data: {
         workspaceId: input.workspaceId,

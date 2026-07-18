@@ -15,11 +15,14 @@ export class UtilitiesService {
   ) {}
 
   async listPolicies(auth: AuthUser, workspaceId: string, propertyId?: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth, workspaceId, 'utility', 'view',
+    );
+    if (propertyId) this.workspaces.assertPropertyInScope(membership, propertyId);
     return this.prisma.utilityBillingPolicy.findMany({
       where: {
         workspaceId,
-        ...(propertyId ? { propertyId } : {}),
+        ...(propertyId ? { propertyId } : this.workspaces.propertyIdFilter(membership)),
         isActive: true,
       },
       include: {
@@ -30,7 +33,10 @@ export class UtilitiesService {
   }
 
   async createPolicy(auth: AuthUser, dto: CreateUtilityPolicyDto) {
-    const { user } = await this.workspaces.assertMember(auth, dto.workspaceId);
+    const { user, membership } = await this.workspaces.assertPermission(
+      auth, dto.workspaceId, 'utility', 'create',
+    );
+    this.workspaces.assertPropertyInScope(membership, dto.propertyId);
     const property = await this.prisma.property.findFirst({
       where: { id: dto.propertyId, workspaceId: dto.workspaceId },
     });
@@ -76,7 +82,10 @@ export class UtilitiesService {
       },
     });
     if (!reading) throw new NotFoundException('Reading not found');
-    await this.workspaces.assertMember(auth, reading.meter.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth, reading.meter.workspaceId, 'invoice', 'create',
+    );
+    this.workspaces.assertPropertyInScope(membership, reading.meter.propertyId);
     if (reading.status !== 'VERIFIED' && reading.status !== 'RECORDED') {
       throw new NotFoundException('Reading not ready');
     }
@@ -111,6 +120,8 @@ export class UtilitiesService {
             where: {
               id: input.leaseId,
               workspaceId: reading.meter.workspaceId,
+              propertyId: reading.meter.propertyId,
+              ...(reading.meter.roomId ? { roomId: reading.meter.roomId } : {}),
             },
           })
         : null;
@@ -118,6 +129,8 @@ export class UtilitiesService {
       lease = await this.prisma.lease.findFirst({
         where: {
           roomId: reading.meter.roomId,
+          workspaceId: reading.meter.workspaceId,
+          propertyId: reading.meter.propertyId,
           status: { in: ['ACTIVE', 'ENDING_SOON'] },
         },
       });

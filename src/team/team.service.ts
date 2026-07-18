@@ -31,12 +31,22 @@ export class TeamService {
   ) {}
 
   async listMembers(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'workspace',
+      'manage_access',
+    );
     return this.prisma.workspaceMember.findMany({
       where: { workspaceId },
       include: {
         user: {
-          select: { id: true, email: true, fullName: true, externalUserId: true },
+          select: {
+            id: true,
+            email: true,
+            fullName: true,
+            externalUserId: true,
+          },
         },
         role: true,
         propertyAccess: true,
@@ -45,7 +55,12 @@ export class TeamService {
   }
 
   async listInvitations(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'workspace',
+      'manage_access',
+    );
     return this.prisma.invitation.findMany({
       where: { workspaceId, status: 'PENDING' },
       orderBy: { createdAt: 'desc' },
@@ -88,14 +103,32 @@ export class TeamService {
       propertyIds?: string[];
     },
   ) {
-    const { user } = await this.workspaces.assertMember(
+    const { user } = await this.workspaces.assertPermission(
       auth,
       input.workspaceId,
+      'workspace',
+      'manage_access',
     );
+    if (input.roleKey === 'owner') {
+      throw new BadRequestException(
+        'Owner role cannot be assigned by invitation',
+      );
+    }
     const role = await this.ensureRole(
       input.workspaceId,
       input.roleKey || 'manager',
     );
+    if (input.propertyIds?.length) {
+      const count = await this.prisma.property.count({
+        where: {
+          id: { in: input.propertyIds },
+          workspaceId: input.workspaceId,
+        },
+      });
+      if (count !== new Set(input.propertyIds).size) {
+        throw new NotFoundException('Property not found in workspace');
+      }
+    }
     const token = randomBytes(24).toString('hex');
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7);
@@ -161,6 +194,21 @@ export class TeamService {
       });
       return;
     }
+    const role = await this.prisma.role.findFirst({
+      where: { id: inv.roleId, workspaceId: inv.workspaceId },
+    });
+    if (!role || role.key === 'owner') {
+      throw new BadRequestException('Invalid invitation role');
+    }
+    const current = await this.prisma.workspaceMember.findUnique({
+      where: { workspaceId_userId: { workspaceId: inv.workspaceId, userId } },
+      include: { role: true },
+    });
+    if (current?.role.key === 'owner') {
+      throw new BadRequestException(
+        'Owner membership cannot be changed by invitation',
+      );
+    }
 
     await this.prisma.$transaction(async (tx) => {
       const member = await tx.workspaceMember.upsert({
@@ -205,6 +253,9 @@ export class TeamService {
     if (inv.status !== 'PENDING') {
       throw new BadRequestException('Invitation not pending');
     }
+    if (!auth.email || auth.email.toLowerCase() !== inv.email.toLowerCase()) {
+      throw new BadRequestException('Invitation email does not match');
+    }
     const user = await this.prisma.user.upsert({
       where: { externalUserId: auth.externalUserId },
       create: {
@@ -225,10 +276,23 @@ export class TeamService {
       where: { id: input.memberId },
     });
     if (!member) throw new NotFoundException('Member not found');
-    const { user } = await this.workspaces.assertMember(
+    const { user } = await this.workspaces.assertPermission(
       auth,
       member.workspaceId,
+      'workspace',
+      'manage_access',
     );
+    if (input.propertyIds.length) {
+      const count = await this.prisma.property.count({
+        where: {
+          id: { in: input.propertyIds },
+          workspaceId: member.workspaceId,
+        },
+      });
+      if (count !== new Set(input.propertyIds).size) {
+        throw new NotFoundException('Property not found in workspace');
+      }
+    }
     await this.prisma.memberPropertyAccess.deleteMany({
       where: { memberId: member.id },
     });

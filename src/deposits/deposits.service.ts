@@ -18,9 +18,24 @@ export class DepositsService {
   ) {}
 
   async list(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'payment',
+      'view',
+    );
+    const scope = this.workspaces.propertyScope(membership);
     return this.prisma.depositAccount.findMany({
-      where: { workspaceId },
+      where: {
+        workspaceId,
+        ...(scope
+          ? {
+              lease: {
+                propertyId: { in: scope.length ? scope : ['__none__'] },
+              },
+            }
+          : {}),
+      },
       include: {
         tenant: { select: { id: true, fullName: true } },
         lease: { select: { id: true, leaseNumber: true, status: true } },
@@ -80,16 +95,23 @@ export class DepositsService {
   ) {
     const account = await this.prisma.depositAccount.findUnique({
       where: { id: input.depositAccountId },
+      include: { lease: { select: { propertyId: true } } },
     });
     if (!account) throw new NotFoundException('Deposit account not found');
-    const { user } = await this.workspaces.assertMember(
+    const { user, membership } = await this.workspaces.assertPermission(
       auth,
       account.workspaceId,
+      'payment',
+      'create',
     );
+    this.workspaces.assertPropertyInScope(membership, account.lease.propertyId);
 
     const amount = new Prisma.Decimal(input.amount);
     if (amount.lessThanOrEqualTo(0)) {
       throw new BadRequestException('Amount must be positive');
+    }
+    if (input.type === DepositTxnType.DEDUCTION) {
+      throw new BadRequestException('Deposit deductions require approval');
     }
 
     let next = new Prisma.Decimal(account.balance);
@@ -98,10 +120,7 @@ export class DepositsService {
       input.type === DepositTxnType.ADDITIONAL
     ) {
       next = next.add(amount);
-    } else if (
-      input.type === DepositTxnType.DEDUCTION ||
-      input.type === DepositTxnType.REFUND
-    ) {
+    } else if (input.type === DepositTxnType.REFUND) {
       next = next.sub(amount);
     } else if (input.type === DepositTxnType.ADJUSTMENT) {
       next = next.add(amount);
@@ -114,6 +133,13 @@ export class DepositsService {
     }
 
     const result = await this.prisma.$transaction(async (tx) => {
+      const changed = await tx.depositAccount.updateMany({
+        where: { id: account.id, balance: account.balance },
+        data: { balance: next },
+      });
+      if (changed.count !== 1) {
+        throw new BadRequestException('Deposit balance changed; retry');
+      }
       const txn = await tx.depositTransaction.create({
         data: {
           depositAccountId: account.id,
@@ -123,9 +149,9 @@ export class DepositsService {
           reason: input.reason,
         },
       });
-      const updated = await tx.depositAccount.update({
+      const updated = await tx.depositAccount.findUniqueOrThrow({
         where: { id: account.id },
-        data: { balance: next },
+        include: { lease: { select: { propertyId: true } } },
       });
       return { account: updated, transaction: txn };
     });
@@ -159,52 +185,61 @@ export class DepositsService {
   ) {
     const account = await this.prisma.depositAccount.findUnique({
       where: { id: input.depositAccountId },
+      include: { lease: { select: { propertyId: true } } },
     });
     if (!account) throw new NotFoundException('Deposit account not found');
-    const { user } = await this.workspaces.assertMember(
+    const { user, membership } = await this.workspaces.assertPermission(
       auth,
       account.workspaceId,
+      'payment',
+      'approve',
     );
+    this.workspaces.assertPropertyInScope(membership, account.lease.propertyId);
 
     const damage = input.damageAmount ?? 0;
-    if (damage > 0 && input.requireApproval) {
-      await this.prisma.approvalRequest.create({
-        data: {
+    if (damage < 0 || (input.refundAmount ?? 0) < 0) {
+      throw new BadRequestException('Settlement amounts cannot be negative');
+    }
+    if (damage > 0) {
+      const existing = await this.prisma.approvalRequest.findFirst({
+        where: {
           workspaceId: account.workspaceId,
           kind: 'deposit_deduction',
-          entityType: 'deposit_account',
           entityId: account.id,
-          payload: {
-            damageAmount: damage,
-            reason: input.damageReason,
-          },
-          requestedBy: user.id,
           status: 'pending',
-          note: input.damageReason,
         },
       });
+      const approval =
+        existing ??
+        (await this.prisma.approvalRequest.create({
+          data: {
+            workspaceId: account.workspaceId,
+            kind: 'deposit_deduction',
+            entityType: 'deposit_account',
+            entityId: account.id,
+            payload: {
+              damageAmount: damage,
+              reason: input.damageReason,
+              refundAmount: input.refundAmount,
+            },
+            requestedBy: user.id,
+            status: 'pending',
+            note: input.damageReason,
+          },
+        }));
       return {
         pendingApproval: true,
+        approvalId: approval.id,
         message: 'Deduction submitted for approval',
       };
     }
 
     let last = { account, transaction: null as unknown };
-    if (damage > 0) {
-      last = await this.record(auth, {
-        depositAccountId: account.id,
-        type: DepositTxnType.DEDUCTION,
-        amount: damage,
-        reason: input.damageReason ?? 'Checkout damage',
-      });
-    }
     const bal = Number(
       (last as { account: { balance: unknown } }).account.balance,
     );
     const refund =
-      input.refundAmount !== undefined
-        ? input.refundAmount
-        : Math.max(bal, 0);
+      input.refundAmount !== undefined ? input.refundAmount : Math.max(bal, 0);
     if (refund > 0) {
       last = await this.record(auth, {
         depositAccountId: account.id,

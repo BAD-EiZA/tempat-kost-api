@@ -73,8 +73,6 @@ export class PublicController {
       fullName: string;
       phone: string;
       email?: string;
-      holdDays?: number;
-      feeAmount?: number;
       notes?: string;
     },
   ) {

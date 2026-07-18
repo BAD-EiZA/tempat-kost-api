@@ -15,7 +15,10 @@ export class StructureService {
       where: { id: propertyId },
     });
     if (!property) throw new NotFoundException();
-    await this.workspaces.assertMember(auth, property.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth, property.workspaceId, 'room', 'view',
+    );
+    this.workspaces.assertPropertyInScope(membership, property.id);
     return this.prisma.building.findMany({
       where: { propertyId },
       include: { floors: { orderBy: { level: 'asc' } } },
@@ -31,7 +34,10 @@ export class StructureService {
       where: { id: input.propertyId },
     });
     if (!property) throw new NotFoundException();
-    await this.workspaces.assertMember(auth, property.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth, property.workspaceId, 'room', 'create',
+    );
+    this.workspaces.assertPropertyInScope(membership, property.id);
     return this.prisma.building.create({
       data: {
         workspaceId: property.workspaceId,
@@ -51,7 +57,10 @@ export class StructureService {
       include: { property: true },
     });
     if (!building) throw new NotFoundException();
-    await this.workspaces.assertMember(auth, building.property.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth, building.property.workspaceId, 'room', 'create',
+    );
+    this.workspaces.assertPropertyInScope(membership, building.propertyId);
     return this.prisma.floor.create({
       data: {
         buildingId: input.buildingId,
@@ -62,7 +71,10 @@ export class StructureService {
   }
 
   async listRoomTypes(auth: AuthUser, workspaceId: string, propertyId?: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth, workspaceId, 'room', 'view',
+    );
+    if (propertyId) this.workspaces.assertPropertyInScope(membership, propertyId);
     return this.prisma.roomType.findMany({
       where: {
         workspaceId,
@@ -84,7 +96,16 @@ export class StructureService {
       description?: string;
     },
   ) {
-    await this.workspaces.assertMember(auth, input.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth, input.workspaceId, 'room', 'create',
+    );
+    this.workspaces.assertPropertyInScope(membership, input.propertyId);
+    if (input.propertyId) {
+      const property = await this.prisma.property.findFirst({
+        where: { id: input.propertyId, workspaceId: input.workspaceId },
+      });
+      if (!property) throw new NotFoundException('Property not found');
+    }
     return this.prisma.roomType.create({
       data: {
         workspaceId: input.workspaceId,

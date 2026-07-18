@@ -42,9 +42,11 @@ export class PaymentsService {
   }
 
   async list(auth: AuthUser, workspaceId: string) {
-    const { membership } = await this.workspaces.assertMember(
+    const { membership } = await this.workspaces.assertPermission(
       auth,
       workspaceId,
+      'payment',
+      'view',
     );
     return this.prisma.payment.findMany({
       where: {
@@ -56,7 +58,9 @@ export class PaymentsService {
         tenant: { select: { id: true, fullName: true } },
         allocations: {
           include: {
-            invoice: { select: { id: true, invoiceNumber: true, status: true } },
+            invoice: {
+              select: { id: true, invoiceNumber: true, status: true },
+            },
           },
         },
         receipt: true,
@@ -74,7 +78,13 @@ export class PaymentsService {
       },
     });
     if (!payment) throw new NotFoundException('Payment not found');
-    await this.workspaces.assertMember(auth, payment.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      payment.workspaceId,
+      'payment',
+      'view',
+    );
+    this.workspaces.assertPropertyInScope(membership, payment.propertyId);
     const aiJobs = await this.prisma.aiJob.findMany({
       where: {
         workspaceId: payment.workspaceId,
@@ -88,7 +98,12 @@ export class PaymentsService {
   }
 
   async createManual(auth: AuthUser, dto: CreatePaymentDto) {
-    const { user } = await this.workspaces.assertMember(auth, dto.workspaceId);
+    const { user, membership } = await this.workspaces.assertPermission(
+      auth,
+      dto.workspaceId,
+      'payment',
+      'create',
+    );
     const amount = this.money(dto.amount);
 
     let invoice: {
@@ -106,12 +121,37 @@ export class PaymentsService {
         where: { id: dto.invoiceId, workspaceId: dto.workspaceId },
       });
       if (!invoice) throw new NotFoundException('Invoice not found');
+      this.workspaces.assertPropertyInScope(membership, invoice.propertyId);
       if (
         invoice.status === InvoiceStatus.VOID ||
         invoice.status === InvoiceStatus.DRAFT
       ) {
         throw new BadRequestException('Invoice not payable in current status');
       }
+    }
+    const propertyId = dto.propertyId ?? invoice?.propertyId;
+    const tenantId = dto.tenantId ?? invoice?.tenantId;
+    this.workspaces.assertPropertyInScope(membership, propertyId);
+    const [property, tenant] = await Promise.all([
+      propertyId
+        ? this.prisma.property.findFirst({
+            where: { id: propertyId, workspaceId: dto.workspaceId },
+          })
+        : null,
+      tenantId
+        ? this.prisma.tenant.findFirst({
+            where: { id: tenantId, workspaceId: dto.workspaceId },
+          })
+        : null,
+    ]);
+    if (propertyId && !property)
+      throw new NotFoundException('Property not found');
+    if (tenantId && !tenant) throw new NotFoundException('Tenant not found');
+    if (
+      invoice &&
+      (invoice.propertyId !== propertyId || invoice.tenantId !== tenantId)
+    ) {
+      throw new BadRequestException('Payment relations must match invoice');
     }
 
     const paymentNumber = await this.nextPaymentNumber(dto.workspaceId);
@@ -124,8 +164,8 @@ export class PaymentsService {
       const created = await tx.payment.create({
         data: {
           workspaceId: dto.workspaceId,
-          propertyId: dto.propertyId ?? invoice?.propertyId,
-          tenantId: dto.tenantId ?? invoice?.tenantId,
+          propertyId,
+          tenantId,
           paymentNumber,
           method: dto.method ?? 'BANK_TRANSFER',
           status: PaymentStatus.PENDING,
@@ -201,39 +241,59 @@ export class PaymentsService {
       include: { allocations: true },
     });
     if (!payment) throw new NotFoundException('Payment not found');
-    await this.workspaces.assertMember(auth, payment.workspaceId);
+    const { user, membership } = await this.workspaces.assertPermission(
+      auth,
+      payment.workspaceId,
+      'payment',
+      'approve',
+    );
+    this.workspaces.assertPropertyInScope(membership, payment.propertyId);
     if (payment.status === PaymentStatus.CONFIRMED) return payment;
     if (payment.status === PaymentStatus.REJECTED) {
       throw new BadRequestException('Rejected payment cannot be confirmed');
     }
 
-    const { user } = await this.workspaces.assertMember(
-      auth,
-      payment.workspaceId,
-    );
-
     const result = await this.prisma.$transaction(async (tx) => {
-      const updated = await tx.payment.update({
-        where: { id },
+      const claimed = await tx.payment.updateMany({
+        where: { id, status: PaymentStatus.PENDING },
         data: {
           status: PaymentStatus.CONFIRMED,
           confirmedAt: new Date(),
         },
       });
-
-      for (const alloc of payment.allocations) {
-        const inv = await tx.invoice.findUnique({ where: { id: alloc.invoiceId } });
-        if (!inv) continue;
-        const amountPaid = this.money(inv.amountPaid).add(alloc.amount);
-        const status = this.invoiceStatusAfterPaid(this.money(inv.total), amountPaid);
-        await tx.invoice.update({
-          where: { id: inv.id },
-          data: { amountPaid, status },
-        });
+      if (claimed.count === 0) {
+        return {
+          payment: await tx.payment.findUniqueOrThrow({ where: { id } }),
+          claimed: false,
+        };
       }
 
-      return updated;
+      for (const alloc of payment.allocations) {
+        const inv = await tx.invoice.findUnique({
+          where: { id: alloc.invoiceId },
+        });
+        if (!inv) continue;
+        const amountPaid = this.money(inv.amountPaid).add(alloc.amount);
+        const status = this.invoiceStatusAfterPaid(
+          this.money(inv.total),
+          amountPaid,
+        );
+        const changed = await tx.invoice.updateMany({
+          where: { id: inv.id, amountPaid: inv.amountPaid },
+          data: { amountPaid, status },
+        });
+        if (changed.count !== 1) {
+          throw new BadRequestException('Invoice balance changed; retry');
+        }
+      }
+
+      return {
+        payment: await tx.payment.findUniqueOrThrow({ where: { id } }),
+        claimed: true,
+      };
     });
+
+    if (!result.claimed) return result.payment;
 
     await this.audit.log({
       workspaceId: payment.workspaceId,
@@ -244,7 +304,7 @@ export class PaymentsService {
     });
 
     await this.receipts.createForPayment(id).catch(() => null);
-    return result;
+    return result.payment;
   }
 
   async reject(auth: AuthUser, id: string) {
@@ -253,16 +313,17 @@ export class PaymentsService {
       include: { allocations: true },
     });
     if (!payment) throw new NotFoundException('Payment not found');
-    await this.workspaces.assertMember(auth, payment.workspaceId);
+    const { user, membership } = await this.workspaces.assertPermission(
+      auth,
+      payment.workspaceId,
+      'payment',
+      'approve',
+    );
+    this.workspaces.assertPropertyInScope(membership, payment.propertyId);
     if (payment.status === PaymentStatus.CONFIRMED) {
       throw new BadRequestException('Confirmed payment cannot be rejected');
     }
     if (payment.status === PaymentStatus.REJECTED) return payment;
-
-    const { user } = await this.workspaces.assertMember(
-      auth,
-      payment.workspaceId,
-    );
 
     const result = await this.prisma.$transaction(async (tx) => {
       const updated = await tx.payment.update({
@@ -274,7 +335,9 @@ export class PaymentsService {
       });
 
       for (const alloc of payment.allocations) {
-        const inv = await tx.invoice.findUnique({ where: { id: alloc.invoiceId } });
+        const inv = await tx.invoice.findUnique({
+          where: { id: alloc.invoiceId },
+        });
         if (!inv) continue;
         if (inv.status === InvoiceStatus.PENDING_VERIFICATION) {
           const amountPaid = this.money(inv.amountPaid);

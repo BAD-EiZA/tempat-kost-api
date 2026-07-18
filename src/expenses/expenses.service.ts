@@ -15,9 +15,11 @@ export class ExpensesService {
   ) {}
 
   async list(auth: AuthUser, workspaceId: string) {
-    const { membership } = await this.workspaces.assertMember(
+    const { membership } = await this.workspaces.assertPermission(
       auth,
       workspaceId,
+      'expense',
+      'view',
     );
     return this.prisma.expense.findMany({
       where: {
@@ -39,6 +41,12 @@ export class ExpensesService {
       'create',
     );
     this.workspaces.assertPropertyInScope(membership, dto.propertyId);
+    if (dto.propertyId) {
+      const property = await this.prisma.property.findFirst({
+        where: { id: dto.propertyId, workspaceId: dto.workspaceId },
+      });
+      if (!property) throw new NotFoundException('Property not found');
+    }
     const expense = await this.prisma.expense.create({
       data: {
         workspaceId: dto.workspaceId,
@@ -69,10 +77,15 @@ export class ExpensesService {
   ) {
     const expense = await this.prisma.expense.findUnique({ where: { id } });
     if (!expense) throw new NotFoundException('Expense not found');
-    const { user } = await this.workspaces.assertMember(
+    const { user, membership } = await this.workspaces.assertPermission(
       auth,
       expense.workspaceId,
+      'expense',
+      status === ExpenseStatus.APPROVED || status === ExpenseStatus.PAID
+        ? 'approve'
+        : 'update',
     );
+    this.workspaces.assertPropertyInScope(membership, expense.propertyId);
     const updated = await this.prisma.expense.update({
       where: { id },
       data: {

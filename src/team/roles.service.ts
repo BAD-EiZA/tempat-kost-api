@@ -28,7 +28,7 @@ export class RolesService {
   ) {}
 
   async list(auth: AuthUser, workspaceId: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    await this.workspaces.assertPermission(auth, workspaceId, 'workspace', 'manage_access');
     return this.prisma.role.findMany({
       where: { workspaceId },
       include: { permissions: true, _count: { select: { members: true } } },

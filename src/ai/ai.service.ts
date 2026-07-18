@@ -23,8 +23,15 @@ export class AiService {
     workspaceId: string,
     jobType: string,
     input: object,
+    resource: string,
+    action: string,
   ) {
-    const { user } = await this.workspaces.assertMember(auth, workspaceId);
+    const { user } = await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      resource,
+      action,
+    );
     await this.subscriptions.consumeAiCredit(workspaceId);
     return this.prisma.aiJob.create({
       data: {
@@ -33,9 +40,28 @@ export class AiService {
         status: 'PROCESSING',
         inputJson: input,
         provider: 'gemini',
-        model: 'gemini-3.5-flash',
-      },
+          model: 'gemini-3.5-flash',
+          attemptCount: 1,
+        },
     }).then(async (job) => ({ job, user }));
+  }
+
+  private async runProvider<T>(jobId: string, call: () => Promise<T>) {
+    try {
+      return await call();
+    } catch (error) {
+      await this.prisma.aiJob.update({
+        where: { id: jobId },
+        data: {
+          status: 'FAILED',
+          errorMessage: (error instanceof Error
+            ? error.message
+            : String(error)
+          ).slice(0, 500),
+        },
+      });
+      throw error;
+    }
   }
 
   private async complete(
@@ -69,8 +95,12 @@ export class AiService {
       input.workspaceId,
       'expense_categorization',
       input,
+      'expense',
+      'create',
     );
-    const out = await this.ai.categorizeExpense(input);
+    const out = await this.runProvider(job.id, () =>
+      this.ai.categorizeExpense(input),
+    );
     return this.complete(job.id, out.data, out.confidence, out.usageUnits);
   }
 
@@ -90,8 +120,12 @@ export class AiService {
       input.workspaceId,
       'communication_draft',
       input,
+      'tenant',
+      'create',
     );
-    const out = await this.ai.draftCommunication(input);
+    const out = await this.runProvider(job.id, () =>
+      this.ai.draftCommunication(input),
+    );
     return this.complete(job.id, out.data, out.confidence, out.usageUnits);
   }
 
@@ -104,8 +138,12 @@ export class AiService {
       input.workspaceId,
       'maintenance_triage',
       input,
+      'property',
+      'update',
     );
-    const out = await this.ai.triageMaintenance(input);
+    const out = await this.runProvider(job.id, () =>
+      this.ai.triageMaintenance(input),
+    );
     return this.complete(job.id, out.data, out.confidence, out.usageUnits);
   }
 
@@ -125,8 +163,12 @@ export class AiService {
       input.workspaceId,
       'payment_proof_extraction',
       { hasImage: !!(input.imageUrl || input.base64) },
+      'payment',
+      'create',
     );
-    const out = await this.ai.extractPaymentProof(input);
+    const out = await this.runProvider(job.id, () =>
+      this.ai.extractPaymentProof(input),
+    );
     const data = out.data as Record<string, unknown>;
     const ocrAmount = Number(
       data.amount ?? data.nominal ?? data.gross_amount ?? NaN,
@@ -196,8 +238,12 @@ export class AiService {
       input.workspaceId,
       'smart_search',
       input,
+      'report',
+      'view',
     );
-    const out = await this.ai.nlToSearchDsl(input);
+    const out = await this.runProvider(job.id, () =>
+      this.ai.nlToSearchDsl(input),
+    );
     return this.complete(job.id, out.data, out.confidence, out.usageUnits);
   }
 
@@ -215,8 +261,12 @@ export class AiService {
       input.workspaceId,
       'identity_extraction',
       { consent: true },
+      'tenant',
+      'update',
     );
-    const out = await this.ai.extractIdentity(input);
+    const out = await this.runProvider(job.id, () =>
+      this.ai.extractIdentity(input),
+    );
     return this.complete(job.id, out.data, out.confidence, out.usageUnits);
   }
 
@@ -233,8 +283,12 @@ export class AiService {
       input.workspaceId,
       'damage_analysis',
       input,
+      'property',
+      'update',
     );
-    const out = await this.ai.analyzeDamage(input);
+    const out = await this.runProvider(job.id, () =>
+      this.ai.analyzeDamage(input),
+    );
     return this.complete(job.id, out.data, out.confidence, out.usageUnits);
   }
 
@@ -251,22 +305,57 @@ export class AiService {
       input.workspaceId,
       'repair_estimate',
       input,
+      'property',
+      'update',
     );
-    const out = await this.ai.estimateRepair(input);
+    const out = await this.runProvider(job.id, () =>
+      this.ai.estimateRepair(input),
+    );
     return this.complete(job.id, out.data, out.confidence, out.usageUnits);
   }
 
   async getJob(auth: AuthUser, id: string) {
     const job = await this.prisma.aiJob.findUnique({ where: { id } });
     if (!job) return null;
-    await this.workspaces.assertMember(auth, job.workspaceId);
+    const [resource] = this.jobPermission(job.jobType);
+    await this.workspaces.assertPermission(
+      auth,
+      job.workspaceId,
+      resource,
+      'view',
+    );
     return job;
+  }
+
+  private jobPermission(jobType: string): [string, string] {
+    switch (jobType) {
+      case 'expense_categorization':
+        return ['expense', 'create'];
+      case 'payment_proof_extraction':
+        return ['payment', 'create'];
+      case 'smart_search':
+        return ['report', 'view'];
+      case 'identity_extraction':
+        return ['tenant', 'update'];
+      case 'damage_analysis':
+      case 'repair_estimate':
+      case 'maintenance_triage':
+        return ['property', 'update'];
+      default:
+        return ['tenant', 'create'];
+    }
   }
 
   async confirm(auth: AuthUser, id: string) {
     const job = await this.getJob(auth, id);
     if (!job) return null;
-    const { user } = await this.workspaces.assertMember(auth, job.workspaceId);
+    const [resource, action] = this.jobPermission(job.jobType);
+    const { user } = await this.workspaces.assertPermission(
+      auth,
+      job.workspaceId,
+      resource,
+      action,
+    );
     return this.prisma.aiJob.update({
       where: { id },
       data: {
@@ -280,7 +369,13 @@ export class AiService {
   async reject(auth: AuthUser, id: string) {
     const job = await this.getJob(auth, id);
     if (!job) return null;
-    const { user } = await this.workspaces.assertMember(auth, job.workspaceId);
+    const [resource, action] = this.jobPermission(job.jobType);
+    const { user } = await this.workspaces.assertPermission(
+      auth,
+      job.workspaceId,
+      resource,
+      action,
+    );
     return this.prisma.aiJob.update({
       where: { id },
       data: {

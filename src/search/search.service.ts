@@ -50,7 +50,14 @@ export class SearchService {
   }
 
   async smartSearch(auth: AuthUser, workspaceId: string, query: string) {
-    await this.workspaces.assertMember(auth, workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      workspaceId,
+      'report',
+      'view',
+    );
+    const propertyFilter = this.workspaces.propertyIdFilter(membership);
+    const propertyScope = this.workspaces.propertyScope(membership);
     await this.subscriptions.consumeAiCredit(workspaceId);
 
     const dslResult = await this.ai.nlToSearchDsl({
@@ -77,6 +84,9 @@ export class SearchService {
         results = await this.prisma.tenant.findMany({
           where: {
             workspaceId,
+            ...(propertyScope
+              ? { leases: { some: { propertyId: { in: propertyScope } } } }
+              : {}),
             ...(typeof filters.status === 'string'
               ? { status: filters.status as never }
               : {}),
@@ -99,6 +109,7 @@ export class SearchService {
         results = await this.prisma.room.findMany({
           where: {
             workspaceId,
+            ...propertyFilter,
             ...(typeof filters.status === 'string'
               ? { status: filters.status as never }
               : {}),
@@ -122,6 +133,7 @@ export class SearchService {
         results = await this.prisma.lease.findMany({
           where: {
             workspaceId,
+            ...propertyFilter,
             ...(typeof filters.status === 'string'
               ? { status: filters.status as never }
               : {}),
@@ -140,6 +152,7 @@ export class SearchService {
         results = await this.prisma.invoice.findMany({
           where: {
             workspaceId,
+            ...propertyFilter,
             ...(typeof filters.status === 'string'
               ? { status: filters.status as never }
               : overdueHint
@@ -157,6 +170,7 @@ export class SearchService {
           where: {
             workspaceId,
             status: { not: 'ARCHIVED' },
+            ...(propertyScope ? { id: { in: propertyScope } } : {}),
             ...(qText
               ? { name: { contains: qText, mode: 'insensitive' } }
               : {}),
@@ -168,6 +182,7 @@ export class SearchService {
         results = await this.prisma.payment.findMany({
           where: {
             workspaceId,
+            ...propertyFilter,
             ...(typeof filters.status === 'string'
               ? { status: filters.status as never }
               : {}),
@@ -181,6 +196,7 @@ export class SearchService {
         results = await this.prisma.maintenanceRequest.findMany({
           where: {
             workspaceId,
+            ...propertyFilter,
             ...(typeof filters.status === 'string'
               ? { status: filters.status as never }
               : {}),
@@ -205,6 +221,9 @@ export class SearchService {
       results = await this.prisma.tenant.findMany({
         where: {
           workspaceId,
+          ...(propertyScope
+            ? { leases: { some: { propertyId: { in: propertyScope } } } }
+            : {}),
           fullName: { contains: query, mode: 'insensitive' },
         },
         take,

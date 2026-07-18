@@ -26,7 +26,7 @@ export class SchedulerService {
 
     for (const lease of leases) {
       const invoiceNumber = `INV-${period}-${lease.leaseNumber}`;
-      const exists = await this.prisma.invoice.findUnique({
+      let invoice = await this.prisma.invoice.findUnique({
         where: {
           workspaceId_invoiceNumber: {
             workspaceId: lease.workspaceId,
@@ -34,48 +34,52 @@ export class SchedulerService {
           },
         },
       });
-      if (exists) continue;
+      if (!invoice) {
+        const dueDate = new Date(
+          today.getFullYear(),
+          today.getMonth(),
+          lease.dueDay,
+        );
+        if (dueDate < today) {
+          dueDate.setMonth(dueDate.getMonth() + 1);
+        }
 
-      const dueDate = new Date(today.getFullYear(), today.getMonth(), lease.dueDay);
-      if (dueDate < today) {
-        dueDate.setMonth(dueDate.getMonth() + 1);
+        const amount = new Prisma.Decimal(lease.rentAmount);
+        invoice = await this.prisma.invoice.create({
+          data: {
+            workspaceId: lease.workspaceId,
+            propertyId: lease.propertyId,
+            tenantId: lease.tenantId,
+            leaseId: lease.id,
+            invoiceNumber,
+            type: 'RENT',
+            status: InvoiceStatus.OPEN,
+            issueDate: today,
+            dueDate,
+            subtotal: amount,
+            total: amount,
+            issuedAt: today,
+            items: {
+              create: [
+                {
+                  description: `Sewa ${period} · ${lease.leaseNumber}`,
+                  quantity: 1,
+                  unitPrice: amount,
+                  amount,
+                },
+              ],
+            },
+          },
+        });
+        created += 1;
       }
 
-      const amount = new Prisma.Decimal(lease.rentAmount);
-      await this.prisma.invoice.create({
-        data: {
-          workspaceId: lease.workspaceId,
-          propertyId: lease.propertyId,
-          tenantId: lease.tenantId,
-          leaseId: lease.id,
-          invoiceNumber,
-          type: 'RENT',
-          status: InvoiceStatus.OPEN,
-          issueDate: today,
-          dueDate,
-          subtotal: amount,
-          total: amount,
-          issuedAt: today,
-          items: {
-            create: [
-              {
-                description: `Sewa ${period} · ${lease.leaseNumber}`,
-                quantity: 1,
-                unitPrice: amount,
-                amount,
-              },
-            ],
-          },
-        },
-      });
-      created += 1;
-
-      await this.notifications.notifyWorkspaceOwners(
-        lease.workspaceId,
-        'Invoice dibuat',
-        `Tagihan ${invoiceNumber} untuk ${lease.tenant.fullName}`,
+      await this.notifications.notifyTenantPortal(
+        lease.tenantId,
+        'Tagihan baru',
+        `Tagihan ${invoiceNumber} telah diterbitkan`,
         'invoice',
-        invoiceNumber,
+        invoice.id,
       );
     }
 
@@ -97,14 +101,15 @@ export class SchedulerService {
 
     let sent = 0;
     for (const inv of invoices) {
-      await this.notifications.notifyWorkspaceOwners(
-        inv.workspaceId,
+      if (!inv.tenantId) continue;
+      const delivered = await this.notifications.notifyTenantPortal(
+        inv.tenantId,
         'Pengingat tagihan',
-        `${inv.invoiceNumber} jatuh tempo ${inv.dueDate.toISOString().slice(0, 10)} · ${inv.tenant?.fullName ?? ''}`,
+        `${inv.invoiceNumber} jatuh tempo ${inv.dueDate.toISOString().slice(0, 10)}`,
         'invoice',
         inv.id,
       );
-      sent += 1;
+      if (delivered) sent += 1;
     }
     return { sent };
   }

@@ -63,7 +63,13 @@ Perubahan sewa/utilitas hanya melalui addendum.</p>
       },
     });
     if (!lease) throw new NotFoundException('Lease not found');
-    await this.workspaces.assertMember(auth, lease.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      lease.workspaceId,
+      'lease',
+      'update',
+    );
+    this.workspaces.assertPropertyInScope(membership, lease.propertyId);
 
     const count = await this.prisma.contractDocument.count({
       where: { leaseId },
@@ -86,9 +92,18 @@ Perubahan sewa/utilitas hanya melalui addendum.</p>
   }
 
   async listByLease(auth: AuthUser, leaseId: string) {
-    const lease = await this.prisma.lease.findUnique({ where: { id: leaseId } });
+    const lease = await this.prisma.lease.findUnique({
+      where: { id: leaseId },
+      select: { workspaceId: true, propertyId: true },
+    });
     if (!lease) throw new NotFoundException();
-    await this.workspaces.assertMember(auth, lease.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      lease.workspaceId,
+      'lease',
+      'view',
+    );
+    this.workspaces.assertPropertyInScope(membership, lease.propertyId);
     return this.prisma.contractDocument.findMany({
       where: { leaseId },
       orderBy: { version: 'desc' },
@@ -125,6 +140,14 @@ Perubahan sewa/utilitas hanya melalui addendum.</p>
     token: string,
     input: { signerName: string; signatureData: string },
   ) {
+    const signerName = input.signerName.trim();
+    if (!signerName) throw new BadRequestException('Signer name is required');
+    if (
+      !input.signatureData.startsWith('data:image/png;base64,') &&
+      !input.signatureData.startsWith('data:text/plain;charset=utf-8,')
+    ) {
+      throw new BadRequestException('Invalid signature format');
+    }
     const doc = await this.prisma.contractDocument.findUnique({
       where: { signToken: token },
     });
@@ -132,12 +155,15 @@ Perubahan sewa/utilitas hanya melalui addendum.</p>
     if (doc.status === 'signed') {
       throw new BadRequestException('Already signed');
     }
+    if (doc.status === 'void') {
+      throw new BadRequestException('Contract is void');
+    }
     return this.prisma.contractDocument.update({
       where: { id: doc.id },
       data: {
         status: 'signed',
         signedAt: new Date(),
-        signerName: input.signerName,
+        signerName,
         signatureData: input.signatureData,
       },
     });
@@ -146,9 +172,16 @@ Perubahan sewa/utilitas hanya melalui addendum.</p>
   async void(auth: AuthUser, id: string, reason?: string) {
     const doc = await this.prisma.contractDocument.findUnique({
       where: { id },
+      include: { lease: { select: { propertyId: true } } },
     });
     if (!doc) throw new NotFoundException();
-    await this.workspaces.assertMember(auth, doc.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      doc.workspaceId,
+      'lease',
+      'update',
+    );
+    this.workspaces.assertPropertyInScope(membership, doc.lease.propertyId);
     if (doc.status === 'void') throw new BadRequestException('Already void');
     return this.prisma.contractDocument.update({
       where: { id },
@@ -168,9 +201,16 @@ Perubahan sewa/utilitas hanya melalui addendum.</p>
   ) {
     const doc = await this.prisma.contractDocument.findUnique({
       where: { id },
+      include: { lease: { select: { propertyId: true } } },
     });
     if (!doc) throw new NotFoundException();
-    await this.workspaces.assertMember(auth, doc.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      doc.workspaceId,
+      'lease',
+      'update',
+    );
+    this.workspaces.assertPropertyInScope(membership, doc.lease.propertyId);
     if (doc.status === 'void') throw new BadRequestException('Contract void');
     return this.prisma.contractDocument.update({
       where: { id },
@@ -188,7 +228,13 @@ Perubahan sewa/utilitas hanya melalui addendum.</p>
       include: { lease: true },
     });
     if (!doc) throw new NotFoundException();
-    await this.workspaces.assertMember(auth, doc.workspaceId);
+    const { membership } = await this.workspaces.assertPermission(
+      auth,
+      doc.workspaceId,
+      'lease',
+      'view',
+    );
+    this.workspaces.assertPropertyInScope(membership, doc.lease.propertyId);
     return this.buildPdf(doc);
   }
 

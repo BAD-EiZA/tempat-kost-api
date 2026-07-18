@@ -4,6 +4,7 @@ import { AdminModule } from './admin/admin.module';
 import { AiModule } from './ai/ai.module';
 import { AuthModule } from './auth/auth.module';
 import { AuditModule } from './common/audit/audit.module';
+import { AuditLogsModule } from './audit-logs/audit-logs.module';
 import { validateEnv } from './common/config/env.validation';
 import { InfraModule } from './common/infra/infra.module';
 import { PrismaModule } from './common/prisma/prisma.module';
@@ -49,6 +50,7 @@ import { WorkspacesModule } from './workspaces/workspaces.module';
     }),
     PrismaModule,
     AuditModule,
+    AuditLogsModule,
     InfraModule,
     NotificationsModule,
     SubscriptionsModule,
@@ -89,5 +91,4 @@ import { WorkspacesModule } from './workspaces/workspaces.module';
   ],
 })
 export class AppModule {}
-
 
