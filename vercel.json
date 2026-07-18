@@ -6,7 +6,11 @@
       "src": "src/main.ts",
       "use": "@vercel/node",
       "config": {
-        "includeFiles": ["prisma/**", "node_modules/.prisma/**", "node_modules/@prisma/client/**"]
+        "includeFiles": [
+          "prisma/**",
+          "node_modules/.prisma/**",
+          "node_modules/@prisma/client/**"
+        ]
       }
     }
   ],
@@ -35,7 +39,7 @@
     },
     {
       "path": "/v1/internal/cron/booking-expiry",
-      "schedule": "0 */6 * * *"
+      "schedule": "0 3 * * *"
     },
     {
       "path": "/v1/internal/cron/recurring-expenses",
@@ -43,7 +47,7 @@
     },
     {
       "path": "/v1/internal/cron/outbox-drain",
-      "schedule": "*/5 * * * *"
+      "schedule": "0 4 * * *"
     }
   ]
 }
