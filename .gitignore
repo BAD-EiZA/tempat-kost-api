@@ -6,3 +6,8 @@ coverage
 .env.*.local
 *.log
 /generated
+
+.vercel
+.env*
+
+public/
