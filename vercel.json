@@ -1,0 +1,45 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "src/main.ts",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "src/main.ts"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/v1/internal/cron/invoice-scheduler",
+      "schedule": "0 1 * * *"
+    },
+    {
+      "path": "/v1/internal/cron/reminder-scheduler",
+      "schedule": "0 8 * * *"
+    },
+    {
+      "path": "/v1/internal/cron/lease-expiry",
+      "schedule": "30 1 * * *"
+    },
+    {
+      "path": "/v1/internal/cron/subscription-check",
+      "schedule": "0 2 * * *"
+    },
+    {
+      "path": "/v1/internal/cron/booking-expiry",
+      "schedule": "0 */6 * * *"
+    },
+    {
+      "path": "/v1/internal/cron/recurring-expenses",
+      "schedule": "15 1 * * *"
+    },
+    {
+      "path": "/v1/internal/cron/outbox-drain",
+      "schedule": "*/5 * * * *"
+    }
+  ]
+}
